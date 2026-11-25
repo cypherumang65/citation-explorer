@@ -924,14 +924,15 @@ async function fillFromS2(recs, signal){
     const chunk = need.slice(i, i + 400);
     const headers = { "Content-Type":"text/plain" }; if (key) headers["x-api-key"] = key;
     try {
-      const res = await getJSON(S2B + "?fields=abstract,tldr", { method:"POST", headers, body: JSON.stringify({ ids: chunk.map(r => "DOI:" + r.doi) }), signal }, 6);
+      // Without a key the shared pool is often busy: give up after ~5 s rather than holding up the search.
+      const res = await getJSON(S2B + "?fields=abstract,tldr", { method:"POST", headers, body: JSON.stringify({ ids: chunk.map(r => "DOI:" + r.doi) }), signal }, key ? 6 : 3);
       if (!Array.isArray(res)) throw new Error("unexpected reply");
       res.forEach((p, j) => { if (!p) return; const rec = chunk[j];
         if (p.abstract){ rec.abstract = p.abstract.trim(); rec.abstract_source = "Semantic Scholar"; filled++; }
         if (p.tldr?.text) rec.tldr = p.tldr.text; });
     } catch(e){
       if (e.name === "AbortError") throw e;
-      fail = e.status === 429 ? "rate-limited, so add an S2 key or retry later" : (e.status === 401 || e.status === 403) ? "Semantic Scholar rejected the API key; check it in Settings" : "stopped: " + (e.message || e);
+      fail = e.status === 429 || e.network ? "Semantic Scholar was busy; add a free S2 key in Settings or try again later" : (e.status === 401 || e.status === 403) ? "Semantic Scholar rejected the API key; check it in Settings" : "stopped: " + (e.message || e);
       break;
     }
     done += chunk.length; progress(done, need.length, `Semantic Scholar: filled ${filled} of ${done} missing abstracts…`);
@@ -1045,7 +1046,7 @@ function finish(map, notes, err, noun, runSeeds){
   }
   const missing = S.records.filter(r => !r.abstract).length;
   let head = `${fmt(S.records.length)} ${noun}.`;
-  if (missing) head += ` ${fmt(missing)} ${missing === 1 ? "has" : "have"} no abstract (some publishers, e.g. Elsevier, don't share them with open databases. Tick the Semantic Scholar option to try filling them).`;
+  if (missing) head += ` ${fmt(missing)} ${missing === 1 ? "has" : "have"} no abstract (some publishers, e.g. Elsevier, don't share them with open databases${$("useS2").checked ? "; the DOI link opens the abstract on the publisher's site" : ". Tick the Semantic Scholar option to try filling them"}).`;
   if (err){
     const stopped = err.name === "AbortError";
     note((stopped ? "Stopped early. " : "Stopped by an error: " + friendlyError(err) + "\n") + (S.records.length ? `Kept ${fmt(S.records.length)} papers. You can still filter and export them.` : "") + (notes.length ? "\n" + notes.join("\n") : ""), stopped ? "warn" : "err");

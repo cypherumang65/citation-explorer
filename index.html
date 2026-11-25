@@ -376,7 +376,7 @@ dialog::backdrop{background:rgba(0,0,0,.35)}
     <div class="opt" id="keepWrap"><span>If there are more, keep</span><select id="keep" style="width:auto"><option value="cited">Most cited</option><option value="new">Newest</option></select></div>
     <div class="opt" id="gsMaxWrap"><span>Max papers (Scholar)</span><input id="gsmax" type="number" min="20" step="20" value="200" style="width:120px"></div>
     <div class="opt"><span>Extras</span>
-      <label class="check"><input type="checkbox" id="useS2"> Fill missing abstracts from Semantic Scholar</label>
+      <label class="check" title="Free. Some publishers (e.g. Elsevier) don't share abstracts anywhere, so a few may stay blank."><input type="checkbox" id="useS2" checked> Fill missing abstracts from Semantic Scholar</label>
       <label class="check" id="cacheWrap"><input type="checkbox" id="useCache" checked> Reuse cached Scholar pages</label>
       <label class="check" id="ctxWrap" title="The sentence where each paper cites yours, from Semantic Scholar. Slow without an S2 key."><input type="checkbox" id="useCtx"> How they cite it (citing sentences)</label>
       <label class="check" id="cociteWrap" title="Downloads each citing paper's reference list to find works often cited alongside yours"><input type="checkbox" id="useCocite"> What am I missing? (works often cited alongside)</label></div>

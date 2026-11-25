@@ -38,7 +38,7 @@ const S = {
   lastSources: new Set()
 };
 // Paper summary card (see the end of this file).
-const SUM = { pick: null, info: new Map(), ai: new Map(), busy: new Set() };
+const SUM = { pick: null, info: new Map(), ai: new Map(), busy: new Map(), dev: null, devSum: null, devProgress: null };
 const SUM_SELECT = "id,abstract_inverted_index,primary_topic,keywords,open_access,counts_by_year";
 const AI_MODEL = "claude-opus-5-5";
 const AI_SYSTEM = "You summarize research papers for a PhD student doing a literature review. Using only the title and abstract given, " +
@@ -2340,12 +2340,12 @@ function renderPaperSummary(){
   if (!s){ box.classList.add("hidden"); box.innerHTML = ""; box.dataset.sig = ""; return; }
   box.classList.remove("hidden");
   if (!SUM.info.has(s.id)) loadSumInfo(s);
-  const info = SUM.info.get(s.id); const ai = SUM.ai.get(s.id); const busy = SUM.busy.has(s.id);
+  const info = SUM.info.get(s.id); const ai = SUM.ai.get(s.id); const busy = SUM.busy.has(s.id), busyKind = SUM.busy.get(s.id);
   const many = sumSeeds();
   const pickHtml = many.length > 1 ? `<select id="sumPick" aria-label="Which paper to summarize">${many.map(x => `<option value="${esc(x.id)}"${x.id === s.id ? " selected" : ""}>${esc(x.label)}: ${esc(x.title.slice(0, 60))}${x.title.length > 60 ? "…" : ""}</option>`).join("")}</select>` : "";
   const parts = [`<h3>Summary${many.length > 1 ? " of" : ""} ${pickHtml}</h3>`];
   if (!info.done) parts.push(`<p class="hint">Loading the abstract and details…</p>`);
-  if (ai?.text) parts.push(`<div class="ai"><div class="lab">AI summary</div><p>${esc(ai.text)}</p><div class="hint">Written by Claude from the title and abstract only. Check it against the paper before you rely on it.</div></div>`);
+  if (ai?.text) parts.push(`<div class="ai"><div class="lab">AI summary</div><p>${esc(ai.text)}</p><div class="hint">Written by ${esc(ai.by || "AI")} from the title and abstract only. Check it against the paper before you rely on it.</div></div>`);
   if (info.tldr) parts.push(`<div><div class="lab">In one line</div><p>${esc(info.tldr)}</p><div class="hint">TL;DR from Semantic Scholar.</div></div>`);
   const facts = [];
   const au = s.authors.length > 3 ? s.authors.slice(0, 3).join(", ") + ` + ${s.authors.length - 3} more` : s.authors.join(", ");
@@ -2371,10 +2371,19 @@ function renderPaperSummary(){
   else if (info.done && info.failed) parts.push(`<div class="row"><span class="hint">Couldn't load all the details (the free services may be busy).</span><button class="btn small ghost" id="sumRetry">Try again</button></div>`);
   else if (info.done) parts.push(`<p class="hint">No abstract is available for this paper in OpenAlex or Semantic Scholar.</p>`);
   if (info.done){
-    const hasKey = !!$("aikey").value.trim();
     if (ai?.error) parts.push(`<p class="msg warn" style="margin:0">${esc(ai.error)}</p>`);
-    if (hasKey && info.abstract) parts.push(`<div class="row"><button class="btn small" id="sumAi"${busy ? " disabled" : ""}>${busy ? "Summarizing…" : ai?.text ? "Summarize again" : "Summarize with AI"}</button><span class="hint">Uses your Anthropic key; about 1 US cent.</span></div>`);
-    else if (!hasKey && info.abstract && !ai?.text) parts.push(`<p class="hint">Want a plain-English AI summary? Add your own Anthropic API key in ⚙ Settings.</p>`);
+    if (info.abstract){
+      let q = ""; try { q = encodeURIComponent(chatPrompt(s, info)); } catch(e){}
+      const dev = SUM.dev === "available" || SUM.dev === "downloadable" || SUM.dev === "downloading";
+      const btns = [];
+      if (dev) btns.push(`<button class="btn small" id="sumDev"${busy ? " disabled" : ""} title="Free. Uses Chrome's built-in AI (Gemini Nano) on this computer; the paper is not sent anywhere.">${busyKind === "dev" && SUM.devProgress != null ? `Downloading Chrome's AI… ${SUM.devProgress}%` : busyKind === "dev" ? "Summarizing…" : "Summarize on this device"}</button>`);
+      if ($("aikey").value.trim()) btns.push(`<button class="btn small" id="sumAi"${busy ? " disabled" : ""} title="Uses your Anthropic key; about 1 US cent">${busyKind === "key" ? "Summarizing…" : "Summarize with Claude (your key)"}</button>`);
+      btns.push(`<a class="btn small ghost" href="https://claude.ai/new?q=${q}" target="_blank" rel="noopener noreferrer">Open in Claude ↗</a>`,
+        `<a class="btn small ghost" href="https://chatgpt.com/?q=${q}" target="_blank" rel="noopener noreferrer">Open in ChatGPT ↗</a>`,
+        `<button class="btn small ghost" id="sumCopy">Copy prompt</button>`);
+      parts.push(`<div><div class="lab">Summarize with AI</div><div class="row" style="gap:6px;flex-wrap:wrap">${btns.join("")}</div>
+        <div class="hint" style="margin-top:4px">“Open in…” gives the title and abstract to your own Claude or ChatGPT account in a new tab (a free account works).${dev ? ` “Summarize on this device” runs Chrome's free built-in AI${SUM.dev !== "available" ? ", which Chrome downloads once the first time" : ""}.` : ""} “Copy prompt” is for any other AI.</div></div>`);
+    }
   }
   const html = parts.join("");
   if (box.dataset.sig === html) return;
@@ -2382,11 +2391,13 @@ function renderPaperSummary(){
   const pick = $("sumPick"); if (pick) pick.onchange = e => { SUM.pick = e.target.value; renderPaperSummary(); };
   const btn = $("sumAi"); if (btn) btn.onclick = () => aiSummarize(s);
   const rt = $("sumRetry"); if (rt) rt.onclick = () => { SUM.info.delete(s.id); renderPaperSummary(); };
+  const dv = $("sumDev"); if (dv) dv.onclick = () => deviceSummarize(s);
+  const cp = $("sumCopy"); if (cp) cp.onclick = () => { const t = chatPrompt(s, SUM.info.get(s.id) || {}); navigator.clipboard?.writeText(t).then(() => { cp.textContent = "Copied ✓"; setTimeout(() => { cp.textContent = "Copy prompt"; }, 1500); }, () => msg(t, "ok")); };
 }
 async function aiSummarize(s){
   const info = SUM.info.get(s.id); const key = $("aikey").value.trim();
   if (!key || !info?.abstract || SUM.busy.has(s.id)) return;
-  SUM.busy.add(s.id); SUM.ai.set(s.id, { text: SUM.ai.get(s.id)?.text || "" }); renderPaperSummary();
+  SUM.busy.set(s.id, "key"); SUM.ai.set(s.id, { text: SUM.ai.get(s.id)?.text || "", by: SUM.ai.get(s.id)?.by }); renderPaperSummary();
   const au = s.authors.slice(0, 8).join(", ") + (s.authors.length > 8 ? " et al." : "");
   const paper = [`Title: ${s.title}`, au ? `Authors: ${au}` : "", s.year ? `Year: ${s.year}` : "", s.venue ? `Published in: ${s.venue}` : "", `Abstract: ${info.abstract.slice(0, 12000)}`].filter(Boolean).join("\n");
   const base = { model: AI_MODEL, max_tokens: 16000, system: AI_SYSTEM, messages: [{ role: "user", content: paper }] };
@@ -2413,11 +2424,57 @@ async function aiSummarize(s){
       out = { error: "Claude declined to summarize this paper." };
     } else {
       const text = (j?.content || []).filter(b => b?.type === "text" && typeof b.text === "string").map(b => b.text).join("").trim();
-      out = text ? { text: text.slice(0, 2000) } : { error: "The AI summary came back empty. Try again." };
+      out = text ? { text: text.slice(0, 2000), by: "Claude (your Anthropic key)" } : { error: "The AI summary came back empty. Try again." };
     }
   } catch(e){
     out = { error: "Couldn't reach api.anthropic.com. Check your connection and try again." };
   }
-  if (!out.text && SUM.ai.get(s.id)?.text) out.text = SUM.ai.get(s.id).text;   // keep an earlier summary on a failed retry
+  const prev = SUM.ai.get(s.id); if (!out.text && prev?.text){ out.text = prev.text; out.by = prev.by; }   // keep an earlier summary on a failed retry
   SUM.ai.set(s.id, out); SUM.busy.delete(s.id); renderPaperSummary();
 }
+
+// The same request as text, for the visitor's own Claude/ChatGPT account (links) or any other AI (Copy prompt).
+function chatPrompt(s, info){
+  const au = (s.authors || []).slice(0, 6).join(", ") + ((s.authors || []).length > 6 ? " et al." : "");
+  return ["Summarize this research paper in 3 or 4 plain-English sentences for a PhD student: the problem, what the authors did, the main finding, and why it matters. Use only the title and abstract below, and don't add facts that aren't in them.",
+    "", `Title: ${s.title}`, au ? `Authors: ${au}` : "", s.year ? `Year: ${s.year}` : "", s.venue ? `Published in: ${s.venue}` : "",
+    `Abstract: ${Array.from(String(info.abstract || "")).slice(0, 3500).join("")}`].filter(x => x !== "").join("\n");
+}
+
+/* Chrome's built-in Summarizer (Gemini Nano on the visitor's computer): free, no key, nothing leaves the device. */
+const DEV_OPTS = { type: "tldr", format: "plain-text", length: "medium", expectedInputLanguages: ["en"], outputLanguage: "en" };
+async function checkDevice(){
+  if (typeof self.Summarizer === "undefined" || typeof self.Summarizer.availability !== "function"){ SUM.dev = "none"; return; }
+  try { SUM.dev = await self.Summarizer.availability(DEV_OPTS); } catch(e){ SUM.dev = "none"; }
+  renderPaperSummary();
+}
+async function deviceSummarize(s){
+  const info = SUM.info.get(s.id);
+  if (!info?.abstract || SUM.busy.has(s.id) || typeof self.Summarizer === "undefined") return;
+  const prev = SUM.ai.get(s.id);
+  SUM.busy.set(s.id, "dev"); SUM.ai.set(s.id, { text: prev?.text || "", by: prev?.by }); renderPaperSummary();
+  let out;
+  try {
+    if (!SUM.devSum){
+      // create() is called straight from the click, so Chrome may start its one-time model download.
+      SUM.devSum = await self.Summarizer.create({ ...DEV_OPTS,
+        sharedContext: "Abstracts of research papers, summarized for a PhD student doing a literature review.",
+        monitor(m){ m.addEventListener("downloadprogress", e => {
+          const p = Math.round(100 * (Number(e.loaded) || 0)); if (p === SUM.devProgress) return;
+          const first = SUM.devProgress == null; SUM.devProgress = p;
+          const b = $("sumDev"); if (first || !b) renderPaperSummary(); else b.textContent = `Downloading Chrome's AI… ${p}%`;   // no full redraw per tick
+        }); } });
+    }
+    SUM.dev = "available"; SUM.devProgress = null; renderPaperSummary();
+    const text = await SUM.devSum.summarize(`Title: ${s.title}\n\n${info.abstract.slice(0, 8000)}`,
+      { context: "Say what problem the paper addresses, what the authors did, the main finding, and why it matters." });
+    const t = String(text || "").trim();
+    out = t ? { text: t.slice(0, 2000), by: "Chrome's built-in AI (Gemini Nano, on this device)" } : { error: "Chrome's built-in AI returned nothing. Try “Open in Claude” instead." };
+  } catch(e){
+    SUM.devSum = null; SUM.devProgress = null;
+    out = { error: "Chrome's built-in AI couldn't summarize this paper" + (e?.message ? ` (${String(e.message).slice(0, 120)})` : "") + ". Try “Open in Claude” instead." };
+  }
+  if (!out.text && prev?.text){ out.text = prev.text; out.by = prev.by; }
+  SUM.ai.set(s.id, out); SUM.busy.delete(s.id); SUM.devProgress = null; renderPaperSummary();
+}
+checkDevice();

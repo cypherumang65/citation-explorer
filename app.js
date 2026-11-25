@@ -190,8 +190,8 @@ const TEXMAP = { textendash:"–", textemdash:"—", textdegree:"°", textquoter
   Lambda:"Λ", Xi:"Ξ", Pi:"Π", Sigma:"Σ", Phi:"Φ", Psi:"Ψ", Omega:"Ω", textasciitilde:"~", textunderscore:"_", textbackslash:"" };
 const TEXACC = { "`":"̀", "'":"́", "^":"̂", "~":"̃", "=":"̄", ".":"̇", '"':"̈", u:"̆", v:"̌", H:"̋", c:"̧", k:"̨", d:"̣", b:"̱", r:"̊", t:"͡" };
 function cleanTex(v){
-  let s = String(v || "");
-  s = s.replace(/\\([`'^~=."])\s*\{?\s*\\?([a-zA-Z])\s*\}?/g, (m, a, ch) => ch + TEXACC[a]);
+  let s = String(v || "").slice(0, 20000).replace(/\s+/g, " ");   // one space max between tokens: no slow regex backtracking
+  s = s.replace(/\\([`'^~=."])\s*\{?\s*\\?([a-zA-Z])(?:\s*\})?/g, (m, a, ch) => ch + TEXACC[a]);
   s = s.replace(/\\([uvHckdbrt])(?:\s*\{\s*\\?([a-zA-Z])\s*\}|\s+([a-zA-Z]))/g, (m, a, c1, c2) => (c1 || c2) + TEXACC[a]);
   s = s.replace(/\\([a-zA-Z]+)\s*(\{\})?/g, (m, w) => TEXMAP[w] ?? "");
   s = s.replace(/(?<!\\)\$/g, "").replace(/(?<!\\)[_^](?=[\w{])/g, "").replace(/\\([&%$#_{}])/g, "$1").replace(/[{}]/g, "").replace(/~/g, " ").replace(/--/g, "–");
@@ -209,6 +209,7 @@ function parseBibFields(body, macros){
       else if (ch === '"'){ let d = 0; const st = ++pos; for (; pos < body.length; pos++){ const c = body[pos]; if (c === "{") d++; else if (c === "}") d--; else if (c === '"' && d === 0) break; } val += body.slice(st, pos); pos++; }
       else { const tok = (/^[^,#\s}"{]+/.exec(body.slice(pos)) || [""])[0]; if (!tok) break; pos += tok.length; val += /^\d+$/.test(tok) ? tok : (macros[tok.toLowerCase()] ?? tok); }
       while (pos < body.length && /\s/.test(body[pos])) pos++;
+      if (val.length > 100000) throw new Error("This BibTeX file has a field that is too large (over 100,000 characters), so it wasn't imported.");   // stops @string "macro bombs"
       if (body[pos] === "#"){ pos++; while (pos < body.length && /\s/.test(body[pos])) pos++; continue; }
       break;
     }
@@ -1502,10 +1503,10 @@ $("marksFile").onchange = async e => {
   let n = 0;
   for (const [k, v] of Object.entries(j.marks || {})){
     if (typeof k !== "string" || k.length > 300 || !/^(W\d+$|doi:10\.|t:)/.test(k) || !v || typeof v !== "object") continue;
-    const s = MARK_VALUES.includes(v.s) ? v.s : "", note = typeof v.n === "string" ? v.n.slice(0, 300) : "", d = /^\d{4}-\d{2}-\d{2}$/.test(v.d) ? v.d : today();
+    const s = MARK_VALUES.includes(v.s) ? v.s : "", note = typeof v.n === "string" ? v.n.slice(0, 300) : "", d = /^\d{4}-\d{2}-\d{2}$/.test(v.d) && v.d <= today() ? v.d : today();   // no future dates
     if (!s && !note) continue;
-    const cur = MARKS[k];
-    if (!cur || (!cur.s && !cur.n) || (cur.d || "") <= d){ MARKS[k] = { s, n: note, d, t: Date.now() }; n++; }   // a restore counts as a new edit, so syncing keeps it
+    const cur = MARKS[k]; const curD = cur?.d && cur.d <= today() ? cur.d : "";
+    if (!cur || (!cur.s && !cur.n) || curD <= d){ MARKS[k] = { s, n: note, d, t: Date.now() }; n++; }   // a restore counts as a new edit, so syncing keeps it
   }
   saveMarks();
   let seenN = 0, profileSet = false;
@@ -1514,7 +1515,7 @@ $("marksFile").onchange = async e => {
     let cur = null; try { cur = JSON.parse(store.get(k, "null")); } catch(e){}
     const m = Object.assign(Object.create(null), cur && typeof cur.k === "object" ? cur.k : {});
     for (const [a, d] of Object.entries(v.k)) if (a.length <= 300 && typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d) && (!m[a] || d < m[a])) m[a] = d;
-    const last = [String(cur?.last || ""), String(v.last || "").slice(0, 10)].filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x)).sort().pop() || "";
+    const last = [String(cur?.last || ""), String(v.last || "").slice(0, 10)].filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x) && x <= today()).sort().pop() || "";
     if (storeSetEvicting(k, JSON.stringify({ last, k: { ...m }, scope: cur?.scope || (typeof v.scope === "string" ? v.scope.slice(0, 200) : ""), capped: !!(cur?.capped || v.capped) }))){ addSeenIndex(k); seenN++; }
   }
   if (Array.isArray(j.profile)){

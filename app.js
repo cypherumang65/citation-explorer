@@ -2317,8 +2317,11 @@ async function loadSumInfo(s){
       const key = $("s2key").value.trim();
       const j = await getJSON(`${S2P}DOI:${encodeURIComponent(s.doi)}?fields=tldr,abstract`, { headers: key ? { "x-api-key": key } : {} }, 2);
       info.tldr = typeof j?.tldr?.text === "string" ? j.tldr.text.trim() : "";
-      if (!info.abstract && typeof j?.abstract === "string" && j.abstract.trim()){ info.abstract = j.abstract.trim(); info.absSrc = "Semantic Scholar"; }
-    } catch(e){ if (e.status !== 404 && !info.abstract) info.failed = true; }
+      // Some OpenAlex "abstracts" are only a one-line blurb (e.g. a journal's graphical-abstract text):
+      // use Semantic Scholar's when OpenAlex has none, or when OpenAlex's is short and S2's is clearly fuller.
+      const s2abs = typeof j?.abstract === "string" ? j.abstract.trim() : "";
+      if (s2abs && (!info.abstract || (info.abstract.length < 600 && s2abs.length > info.abstract.length * 1.5))){ info.abstract = s2abs; info.absSrc = "Semantic Scholar"; }
+    } catch(e){ if (e.status !== 404){ if (!info.abstract) info.failed = true; else if (info.abstract.length < 600) info.shortOnly = true; } }
   }
   info.done = true;
   renderPaperSummary();
@@ -2368,6 +2371,7 @@ function renderPaperSummary(){
     parts.push(`<div><div class="lab">Who cites it (from the ${fmt(cb.n)} citing papers loaded)</div>${cb.fields.length ? `<p>Mostly ${esc(cb.fields.join(", "))}.</p>` : ""}${cb.top.length ? `<p class="meta" style="margin-top:4px">Most-cited papers citing it:</p><ol class="meta">${cb.top.map(r => `<li>${esc(r.title)}${r.year ? ` (${esc(r.year)})` : ""} · cited ${fmt(Number(r.cited_by_count) || 0)}</li>`).join("")}</ol>` : ""}</div>`);
   }
   if (info.abstract) parts.push(`<details${!ai?.text && !info.tldr ? " open" : ""}><summary>Abstract (${esc(info.absSrc)})</summary><p>${esc(info.abstract)}</p></details>`);
+  if (info.abstract){ if (info.shortOnly) parts.push(`<div class="row"><span class="hint">Only a short abstract was found. Semantic Scholar, which may have a longer one, couldn't be reached (it may be busy).</span><button class="btn small ghost" id="sumRetry">Try again</button></div>`); }
   else if (info.done && info.failed) parts.push(`<div class="row"><span class="hint">Couldn't load all the details (the free services may be busy).</span><button class="btn small ghost" id="sumRetry">Try again</button></div>`);
   else if (info.done) parts.push(`<p class="hint">No abstract is available for this paper in OpenAlex or Semantic Scholar.</p>`);
   if (info.done){

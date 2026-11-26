@@ -2,7 +2,7 @@
 (function () {
   try {
     var t = localStorage.getItem("ce2_theme");
-    if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+    if (t === "light" || t === "dark" || t === "sepia" || t === "contrast") document.documentElement.setAttribute("data-theme", t);
   } catch (e) {}
 })();
 // Anti-clickjacking: GitHub Pages can't send X-Frame-Options, so if another site embeds this page in a

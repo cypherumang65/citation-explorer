@@ -1247,7 +1247,8 @@ function renderFacets(){
     $(el).innerHTML = (list.map(([v, c]) => `<button type="button" class="chip${S.facet[key] === v ? " on" : ""}" data-v="${esc(v)}" aria-pressed="${S.facet[key] === v}">${esc(v)}<small>${fmt(c)}</small></button>`).join("") || '<span class="hint">—</span>') + moreChip(el, list.length, show);
     $(el).querySelectorAll(".chip:not(.more)").forEach(ch => ch.onclick = () => toggleFacet(key, ch.dataset.v));
   };
-  chips("subChips", countBy(S.view, r => [r.subfield]), "subfield", 16, 8);
+  chips("subChips", countBy(S.view, r => [r.subfield]), "subfield", 30, 30);
+  chips("topicChips", countBy(S.view, r => [r.primary_topic]), "topic", 40, 12);
   chips("kwChips", countBy(S.view, r => r.keywords ? r.keywords.split("; ") : []), "kw", 40);
   const seedAids = new Set(S.origin === "seeds" ? (S.runSeeds || []).flatMap(s => [...s.authorIds]) : []);
   const named = (el, arr, key) => {
@@ -1474,16 +1475,17 @@ $("expBib").onclick = () => {
 checkProxy();
 updateSourceUI();
 
-/* ---------------- theme: Auto (follows the Mac) → Light → Dark ---------------- */
-const THEMES = { auto: "◐ Auto", light: "☀ Light", dark: "☾ Dark" };
+/* ---------------- theme menu: Auto (follows the device), Light, Dark, Sepia, High contrast ---------------- */
+const THEMES = { auto: "◐ Auto", light: "☀ Light", dark: "☾ Dark", sepia: "❦ Sepia", contrast: "◑ High contrast" };
 function applyTheme(t){
-  if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
-  else document.documentElement.removeAttribute("data-theme");
-  $("themeBtn").textContent = THEMES[t] || THEMES.auto;
-  $("themeBtn").title = t === "auto" || !THEMES[t] ? "Theme follows your Mac's appearance. Click for Light." : t === "light" ? "Light theme. Click for Dark." : "Dark theme. Click to follow your Mac again.";
+  if (!THEMES[t]) t = "auto";
+  if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t);
+  $("themeBtn").textContent = THEMES[t];
+  $("themeBtn").title = "Theme: " + THEMES[t].slice(2) + (t === "auto" ? " (follows your device's light/dark setting)" : "");
+  document.querySelectorAll("#themeMenu [data-th]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.th === t)));
 }
 let theme = store.get("theme", "auto"); applyTheme(theme);
-$("themeBtn").onclick = () => { theme = theme === "auto" ? "light" : theme === "light" ? "dark" : "auto"; store.set("theme", theme); applyTheme(theme); };
+document.querySelectorAll("#themeMenu [data-th]").forEach(b => b.onclick = () => { theme = b.dataset.th; store.set("theme", theme); applyTheme(theme); $("themeMenu").removeAttribute("open"); $("themeBtn").focus(); });
 
 /* ================= impact (OpenAlex) ================= */
 function impactOf(w){
@@ -2412,17 +2414,17 @@ function renderPaperSummary(){
   else if (info.done) parts.push(`<p class="hint">No abstract is available for this paper in OpenAlex or Semantic Scholar.</p>`);
   if (info.done){
     if (ai?.error) parts.push(`<p class="msg warn" style="margin:0">${esc(ai.error)}</p>`);
-    if (info.abstract){
+    {
       let q = ""; try { q = encodeURIComponent(chatPrompt(s, info)); } catch(e){}
       const dev = SUM.dev === "available" || SUM.dev === "downloadable" || SUM.dev === "downloading";
       const btns = [];
-      if (dev) btns.push(`<button class="btn small" id="sumDev"${busy ? " disabled" : ""} title="Free. Uses Chrome's built-in AI (Gemini Nano) on this computer; the paper is not sent anywhere.">${busyKind === "dev" && SUM.devProgress != null ? `Downloading Chrome's AI… ${SUM.devProgress}%` : busyKind === "dev" ? "Summarizing…" : "Summarize on this device"}</button>`);
-      if ($("aikey").value.trim()) btns.push(`<button class="btn small" id="sumAi"${busy ? " disabled" : ""} title="Uses your Anthropic key; about 1 US cent">${busyKind === "key" ? "Summarizing…" : "Summarize with Claude (your key)"}</button>`);
+      if (dev && info.abstract) btns.push(`<button class="btn small" id="sumDev"${busy ? " disabled" : ""} title="Free. Uses Chrome's built-in AI (Gemini Nano) on this computer; the paper is not sent anywhere.">${busyKind === "dev" && SUM.devProgress != null ? `Downloading Chrome's AI… ${SUM.devProgress}%` : busyKind === "dev" ? "Summarizing…" : "Summarize on this device"}</button>`);
+      if ($("aikey").value.trim() && info.abstract) btns.push(`<button class="btn small" id="sumAi"${busy ? " disabled" : ""} title="Uses your Anthropic key; about 1 US cent">${busyKind === "key" ? "Summarizing…" : "Summarize with Claude (your key)"}</button>`);
       btns.push(`<a class="btn small ghost" href="https://claude.ai/new?q=${q}" target="_blank" rel="noopener noreferrer">Open in Claude ↗</a>`,
         `<a class="btn small ghost" href="https://chatgpt.com/?q=${q}" target="_blank" rel="noopener noreferrer">Open in ChatGPT ↗</a>`,
         `<button class="btn small ghost" id="sumCopy">Copy prompt</button>`);
       parts.push(`<div><div class="lab">Summarize with AI</div><div class="row" style="gap:6px;flex-wrap:wrap">${btns.join("")}</div>
-        <div class="hint" style="margin-top:4px">“Open in…” uses your own Claude or ChatGPT account (a free one works).${dev ? ` “Summarize on this device” runs Chrome's free built-in AI${SUM.dev !== "available" ? ", which Chrome downloads once the first time" : ""}.` : ""} “Copy prompt” is for any other AI.</div></div>`);
+        <div class="hint" style="margin-top:4px">${info.abstract ? "" : "No abstract was found, so the AI gets the title, authors, journal and DOI and is asked to say if it doesn't know the paper. "}“Open in…” uses your own Claude or ChatGPT account (a free one works).${dev ? ` “Summarize on this device” runs Chrome's free built-in AI${SUM.dev !== "available" ? ", which Chrome downloads once the first time" : ""}.` : ""} “Copy prompt” is for any other AI.</div></div>`);
     }
   }
   if (more.length) parts.push(`<details class="psum-more"${SUM.moreOpen ? " open" : ""}><summary>More about this paper: ${[yrs.length >= 2 && "citations per year", cb && "who cites it", info.abstract && "abstract"].filter(Boolean).join(", ")}</summary><div class="psum-more-body">${more.join("")}</div></details>`);
@@ -2478,6 +2480,8 @@ async function aiSummarize(s){
 // The same request as text, for the visitor's own Claude/ChatGPT account (links) or any other AI (Copy prompt).
 function chatPrompt(s, info){
   const au = (s.authors || []).slice(0, 6).join(", ") + ((s.authors || []).length > 6 ? " et al." : "");
+  if (!info.abstract) return ["Summarize this research paper in 3 or 4 plain-English sentences for a PhD student: the problem, what the authors did, the main finding, and why it matters. I couldn't get its abstract, so use what you know about this exact paper (you may look it up by its DOI if you can browse). If you don't recognise it, say so instead of guessing.",
+    "", `Title: ${s.title}`, au ? `Authors: ${au}` : "", s.year ? `Year: ${s.year}` : "", s.venue ? `Published in: ${s.venue}` : "", s.doi ? `DOI: ${s.doi} (https://doi.org/${s.doi})` : ""].filter(x => x !== "").join("\n");
   return ["Summarize this research paper in 3 or 4 plain-English sentences for a PhD student: the problem, what the authors did, the main finding, and why it matters. Use only the title and abstract below, and don't add facts that aren't in them.",
     "", `Title: ${s.title}`, au ? `Authors: ${au}` : "", s.year ? `Year: ${s.year}` : "", s.venue ? `Published in: ${s.venue}` : "",
     `Abstract: ${Array.from(String(info.abstract || "")).slice(0, 3500).join("")}`].filter(x => x !== "").join("\n");
@@ -2552,6 +2556,6 @@ document.addEventListener("toggle", e => {
 // Toolbar menu items close the menu once used.
 document.querySelectorAll(".acts2 .menupop .btn").forEach(b => b.addEventListener("click", () => b.closest("details")?.removeAttribute("open")));
 // Remember whether the Breakdown section is open (this browser only).
-try { if (store.get("breakdown") === "1") $("breakdown").open = true; } catch(e){}
-$("breakdown").addEventListener("toggle", () => { try { store.set("breakdown", $("breakdown").open ? "1" : "0"); } catch(e){} if ($("breakdown").open && S.records.length) renderYear(); });
+try { if (store.get("breakdown2") === "0") $("breakdown").open = false; } catch(e){}
+$("breakdown").addEventListener("toggle", () => { try { store.set("breakdown2", $("breakdown").open ? "1" : "0"); } catch(e){} if ($("breakdown").open && S.records.length) renderYear(); });
 updateRunOptsSummary();

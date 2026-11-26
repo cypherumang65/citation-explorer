@@ -156,6 +156,7 @@ async function checkProxy(){
     catch(e){ S.proxy = false; }
   }
   const keyed = S.proxy && (S.proxyKey || !!$("serpkey").value.trim());
+  $("scholarPill").classList.toggle("hidden", HOSTED); $("srcWrap").classList.toggle("hidden", HOSTED);
   dot.className = "dot " + (keyed ? "on" : "off");
   pill.textContent = keyed ? "Google Scholar: ready" : S.proxy ? "Google Scholar: add SerpApi key" : HOSTED ? "Google Scholar: desktop version only" : "Google Scholar: start server.py";
   $("scholarPill").title = keyed ? "Scholar's Cited-by lists are fetched through SerpApi" :
@@ -600,8 +601,21 @@ function updateSourceUI(){
     s === "gs" ? "Scholar's Cited-by list via SerpApi: 1 search per 20 papers, then each paper is matched to OpenAlex/Crossref for its abstract, field and keywords." :
     s === "both" ? "Fetches both and merges them. The found_in column shows which source found each paper." :
     (scholarOnly ? "Some papers are only on Google Scholar; they'll be fetched from Scholar (the source switches to Both). " : "") + "OpenAlex: free and fast, with abstracts and topics. Choose Google Scholar or Both if you need Scholar's (usually larger) list.";
+  if (HOSTED) $("srcHint").textContent = dir === "refs" ? "Reference lists come from OpenAlex." : "";   // the website only uses OpenAlex
+  updateRunOptsSummary();
+}
+function updateRunOptsSummary(){
+  const src = document.querySelector("input[name=src]:checked")?.value || "oa";
+  const oaCap = fmt(Number($("maxn").value) || 0), gsCap = fmt(Number($("gsmax").value) || 0);
+  const parts = [src === "gs" ? "Google Scholar" : src === "both" ? "OpenAlex + Scholar" : "OpenAlex",
+    src === "gs" ? "up to " + gsCap : src === "both" ? `up to ${oaCap} (OpenAlex) / ${gsCap} (Scholar)` : "up to " + oaCap,
+    $("keep").value === "new" ? "newest" : "most cited"];
+  const ex = [$("useS2").checked && "fill abstracts", $("useCtx").checked && "citing sentences", $("useCocite").checked && "often cited alongside"].filter(Boolean);
+  $("runOptsSum").textContent = "Options: " + parts.join(" · ") + (ex.length ? " · " + ex.join(", ") : "");
 }
 document.querySelectorAll("input[name=dir],input[name=src]").forEach(r => r.addEventListener("change", updateSourceUI));
+["maxn","keep","useS2","useCtx","useCocite","useCache","gsmax"].forEach(id => $(id).addEventListener("change", updateRunOptsSummary));
+document.querySelectorAll("input[name=src]").forEach(r => r.addEventListener("change", updateRunOptsSummary));
 
 /* ---------------- busy / progress ---------------- */
 function begin(title){
@@ -1228,25 +1242,35 @@ function renderFacets(){
   if (S.facet.field && !fields.some(([f]) => f === S.facet.field)) fields.unshift([S.facet.field, 0]);
   $("fieldBars").innerHTML = fields.map(([f, n]) => `<div class="barrow${S.facet.field === f ? " on" : ""}" data-v="${esc(f)}"><div class="lab"><i style="width:${(100 * n / mx).toFixed(1)}%"></i><em>${esc(f)}</em></div><div class="c">${fmt(n)}</div></div>`).join("") || '<p class="hint">No field data.</p>';
   $("fieldBars").querySelectorAll(".barrow").forEach(el => el.onclick = () => toggleFacet("field", el.dataset.v));
-  const chips = (el, arr, key, n) => {
+  const chips = (el, arr, key, n, show = 12) => {
     const list = arr.slice(0, n); if (S.facet[key] && !list.some(([v]) => v === S.facet[key])) list.unshift([S.facet[key], 0]);
-    $(el).innerHTML = list.map(([v, c]) => `<span class="chip${S.facet[key] === v ? " on" : ""}" data-v="${esc(v)}">${esc(v)}<small>${fmt(c)}</small></span>`).join("") || '<span class="hint">—</span>';
-    $(el).querySelectorAll(".chip").forEach(ch => ch.onclick = () => toggleFacet(key, ch.dataset.v));
+    $(el).innerHTML = (list.map(([v, c]) => `<button type="button" class="chip${S.facet[key] === v ? " on" : ""}" data-v="${esc(v)}" aria-pressed="${S.facet[key] === v}">${esc(v)}<small>${fmt(c)}</small></button>`).join("") || '<span class="hint">—</span>') + moreChip(el, list.length, show);
+    $(el).querySelectorAll(".chip:not(.more)").forEach(ch => ch.onclick = () => toggleFacet(key, ch.dataset.v));
   };
-  chips("subChips", countBy(S.view, r => [r.subfield]), "subfield", 16);
+  chips("subChips", countBy(S.view, r => [r.subfield]), "subfield", 16, 8);
   chips("kwChips", countBy(S.view, r => r.keywords ? r.keywords.split("; ") : []), "kw", 40);
   const seedAids = new Set(S.origin === "seeds" ? (S.runSeeds || []).flatMap(s => [...s.authorIds]) : []);
   const named = (el, arr, key) => {
     const list = arr.slice(0, 15); if (S.facet[key] && !list.some(([v]) => v === S.facet[key])) list.unshift([S.facet[key], 0]);
-    $(el).innerHTML = list.map(([v, c]) => `<span class="chip${S.facet[key] === v ? " on" : ""}" data-v="${esc(v)}" title="${esc(v)}">${esc(S.names.get(v) || v)}<small>${fmt(c)}</small></span>`).join("") || '<span class="hint">—</span>';
-    $(el).querySelectorAll(".chip").forEach(ch => ch.onclick = () => toggleFacet(key, ch.dataset.v));
+    $(el).innerHTML = (list.map(([v, c]) => `<button type="button" class="chip${S.facet[key] === v ? " on" : ""}" data-v="${esc(v)}" title="${esc(v)}" aria-pressed="${S.facet[key] === v}">${esc(S.names.get(v) || v)}<small>${fmt(c)}</small></button>`).join("") || '<span class="hint">—</span>') + moreChip(el, list.length, 8);
+    $(el).querySelectorAll(".chip:not(.more)").forEach(ch => ch.onclick = () => toggleFacet(key, ch.dataset.v));
   };
   named("authChips", countBy(S.view, r => [...new Set(r._aids.filter(a => a && !seedAids.has(a)))]), "author");
   named("instChips", countBy(S.view, r => r._inst.map(i => i[0])), "inst");
   $("whoCard").classList.toggle("hidden", !S.records.some(r => r._aids.some(Boolean)));
 }
+// Long chip lists show the first few; "Show all" reveals the rest (kept in the page, just hidden).
+S.facetMore = new Set();
+function moreChip(el, n, show){
+  const box = $(el), open = S.facetMore.has(el);
+  box.classList.toggle("clamped", n > show && !open); box.classList.toggle("people", show === 8);
+  if (n <= show) return "";
+  queueMicrotask(() => { const b = box.querySelector(".chip.more"); if (b) b.onclick = () => { open ? S.facetMore.delete(el) : S.facetMore.add(el); renderFacets(); }; });
+  return `<button type="button" class="chip more" aria-expanded="${open}">${open ? "Show fewer" : "Show all " + fmt(n)}</button>`;
+}
 function toggleFacet(key, v){ S.facet[key] = S.facet[key] === v ? null : v; S.page = 0; applyFilters(); }
 function renderActive(){
+  updateFilterCount();
   const a = [];
   if (S.facet.field) a.push(["field", "Field: " + S.facet.field]);
   if (S.facet.subfield) a.push(["subfield", "Subfield: " + S.facet.subfield]);
@@ -1294,9 +1318,9 @@ function renderList(){
     const link = r.doi ? "https://doi.org/" + encodeURI(r.doi) : (safeUrl(r.url) || safeUrl(r.scholar_link) || scholarSearch(r.title));
     const au = r.authors.split("; ").filter(a => a && a !== "et al.");
     const auS = au.length > 6 ? au.slice(0, 6).join(", ") + " et al." : au.join(", ") + (r.authors_truncated ? " et al." : "");
-    const badges = [
-      r.type && !["article",""].includes(r.type) ? `<span class="badge${r.type === "preprint" ? " pre" : ""}">${esc(r.type)}</span>` : "",
+    const badgeList = [
       r.self_citation === "yes" ? '<span class="badge self" title="Shares an author with your paper">self-citation</span>' : "",
+      r.type && !["article",""].includes(r.type) ? `<span class="badge${r.type === "preprint" ? " pre" : ""}">${esc(r.type)}</span>` : "",
       S.lastSources.size > 1 || r.found_in.includes("Imported") ? `<span class="badge sch">${esc(r.found_in)}</span>` : "",
       r.match_method === "not matched" ? '<span class="badge" title="Not found in OpenAlex/Crossref, so no abstract or topics">not matched</span>' : "",
       multi && r.cites_which ? `<span class="badge" title="Which of your papers it ${S.dir === "refs" ? "is cited by" : "cites"}">${S.dir === "refs" ? "ref of" : "cites"}: ${esc(r.cites_which)}</span>` : "",
@@ -1305,34 +1329,41 @@ function renderList(){
       r.cite_intents ? `<span class="badge" title="How it cites (Semantic Scholar's estimate)">${esc(r.cite_intents.replace("methodology", "uses method").replace("result", "compares results"))}</span>` : "",
       r.top ? `<span class="badge top" title="Field-normalised citation percentile (OpenAlex)">${esc(r.top)}</span>` : "",
       r.in_zotero === "yes" ? `<span class="badge zot" title="Already in your Zotero library">in Zotero</span>` : ""
-    ].join("");
+    ].filter(Boolean);
+    const newB = badgeList.find(b => b.includes('badge new'));
+    const inline = badgeList.filter(b => b !== newB).slice(0, newB ? 1 : 2).concat(newB ? [newB] : []);
+    const badges = inline.join(""), restBadges = badgeList.filter(b => !inline.includes(b)).join("");
     const mk = r.mark ? " mk-" + r.mark : "";
-    const kws = r.keywords ? r.keywords.split("; ").slice(0, 7).map(w => `<span class="kwt" data-kw="${esc(w)}">${hl(w, ws)}</span>`).join("") : "";
+    const kwAll = r.keywords ? r.keywords.split("; ").filter(Boolean) : [];
+    const kws = kwAll.slice(0, 3).map(w => `<button type="button" class="kwt" data-kw="${esc(w)}" title="Show papers with this keyword">${hl(w, ws)}</button>`).join("") + (kwAll.length > 3 ? `<span class="kwmore">+${kwAll.length - 3}</span>` : "");
     const hasText = r.abstract || r.scholar_snippet || r.tldr || r._ctx.length || r._s2seen || true;
     return `<article class="item${sel ? " sel" : ""}${mk}" data-k="${esc(k)}">
       <input type="checkbox" class="selbox" ${sel ? "checked" : ""} aria-label="Select">
       <div style="min-width:0">
         <h3>${badges}<a href="${esc(link)}" target="_blank" rel="noopener noreferrer">${hl(r.title || "(untitled)", ws)}</a></h3>
         <div class="meta">${hl(auS, ws)}</div>
-        <div class="meta">${esc([r.venue, r.year].filter(Boolean).join(" · "))}${r.field ? ` · <span title="${esc(r.domain)}">${esc(r.field)}</span> › ${esc(r.subfield)}` : ""}</div>
+        <div class="meta">${esc([r.venue, r.year].filter(Boolean).join(" · "))}${r.field ? ` · <span title="${esc(r.domain)}${r.subfield ? " › " + esc(r.subfield) : ""}">${esc(r.field)}</span>` : ""}</div>
         ${kws ? `<div class="kws">${kws}</div>` : ""}
         <div class="acts">
           <button class="tog">${open ? "Hide details" : r.abstract ? "Show abstract" + (r._ctx.length ? " & how it cites" : "") : r._ctx.length ? "How it cites" : r.scholar_snippet ? "Show snippet" : "Details & note"}</button>
-          ${safeUrl(r.oa_url) ? `<a href="${esc(safeUrl(r.oa_url))}" target="_blank" rel="noopener noreferrer">PDF / free copy</a>` : ""}
-          <a href="${esc(safeUrl(r.scholar_link) || scholarSearch(r.title))}" target="_blank" rel="noopener noreferrer">Google Scholar</a>
-          ${r.openalex_id ? `<a href="https://openalex.org/${encodeURIComponent(r.openalex_id)}" target="_blank" rel="noopener noreferrer">OpenAlex</a>` : ""}
-          ${r.abstract || r.scholar_snippet ? `<button class="copy">Copy abstract</button>` : ""}
-          ${r.openalex_id ? `<button class="asseed" title="Add this paper to the list above, to see who cites it or what it cites">Use as seed</button>` : ""}
-          <select class="mark" aria-label="Your mark">${[["", "Mark…"], ["relevant", "Relevant"], ["cite", "Will cite"], ["maybe", "Maybe"], ["exclude", "Exclude"]].map(([v, t]) => `<option value="${v}"${r.mark === v ? " selected" : ""}>${t}</option>`).join("")}</select>
+          ${safeUrl(r.oa_url) ? `<a href="${esc(safeUrl(r.oa_url))}" target="_blank" rel="noopener noreferrer" title="Free-to-read copy">PDF</a>` : ""}
+          <select class="mark${r.mark ? " set" : ""}" aria-label="Your mark for ${esc(r.title || "this paper")}">${[["", "Mark…"], ["relevant", "Relevant"], ["cite", "Will cite"], ["maybe", "Maybe"], ["exclude", "Exclude"]].map(([v, t]) => `<option value="${v}"${r.mark === v ? " selected" : ""}>${t}</option>`).join("")}</select>
+          <details class="more"><summary aria-label="More actions" title="More actions">⋯</summary><div class="menupop">
+            <a href="${esc(safeUrl(r.scholar_link) || scholarSearch(r.title))}" target="_blank" rel="noopener noreferrer">Open in Google Scholar ↗</a>
+            ${r.openalex_id ? `<a href="https://openalex.org/${encodeURIComponent(r.openalex_id)}" target="_blank" rel="noopener noreferrer">Open in OpenAlex ↗</a>` : ""}
+            ${r.abstract || r.scholar_snippet ? `<button class="copy">Copy abstract</button>` : ""}
+            ${r.openalex_id ? `<button class="asseed" title="Add this paper to the list above, to see who cites it or what it cites">Use as seed</button>` : ""}
+          </div></details>
           ${r.mark_note && !open ? `<span class="hint" title="Your note">📝 ${esc(r.mark_note.slice(0, 60))}${r.mark_note.length > 60 ? "…" : ""}</span>` : ""}
         </div>
       </div>
-      <div class="cnum">${r.cited_by_count !== "" ? `<b>${fmt(r.cited_by_count)}</b><span>citations</span>` : ""}${r.fwci !== "" ? `<span style="display:block" title="Field-weighted citation impact: 1 = world average for its field and year">FWCI ${esc(r.fwci)}</span>` : ""}${r.scholar_cites !== "" && r.scholar_cites != null ? `<span style="display:block">Scholar: ${fmt(r.scholar_cites)}</span>` : ""}${r.source_cites !== "" && r.source_cites != null ? `<span style="display:block">${esc(r.source_cites_from || "File")}: ${fmt(r.source_cites)}</span>` : ""}</div>
-      ${open ? `<div class="abs">${r.abstract ? hl(r.abstract, ws) : r.scholar_snippet ? "<i>Scholar snippet:</i> " + hl(r.scholar_snippet, ws) : "<i>No abstract available.</i>"}
+      <div class="cnum" title="${r.fwci !== "" && r.fwci != null ? "FWCI " + esc(r.fwci) + " (1 = world average)" : ""}">${r.cited_by_count !== "" ? `<b>${fmt(r.cited_by_count)}</b><span>citations</span>` : ""}${r.scholar_cites !== "" && r.scholar_cites != null ? `<span style="display:block">Scholar ${fmt(r.scholar_cites)}</span>` : ""}${r.source_cites !== "" && r.source_cites != null ? `<span style="display:block">${esc(r.source_cites_from || "File")}: ${fmt(r.source_cites)}</span>` : ""}</div>
+      ${open ? `<div class="abs">${restBadges ? `<div class="badges">${restBadges}</div>` : ""}${r.abstract ? hl(r.abstract, ws) : r.scholar_snippet ? "<i>Scholar snippet:</i> " + hl(r.scholar_snippet, ws) : "<i>No abstract available.</i>"}
         ${r.tldr ? `<div style="margin-top:8px"><b>TL;DR:</b> ${hl(r.tldr, ws)}</div>` : ""}
         ${r._ctx.length ? r._ctx.map(c => `<div class="ctx"><b>How it cites ${esc(c.seed)}:</b> <q>${hl(c.text, ws)}</q></div>`).join("") : r._s2seen ? '<div class="ctx hint">Semantic Scholar has no citing sentence for this paper (usually no full text).</div>' : ""}
         <input type="text" class="mnote" maxlength="300" placeholder="Your note on this paper (saved in this browser)" value="${esc(r.mark_note)}" aria-label="Your note">
-        <div class="src">${[r.primary_topic && "Topic: " + esc(r.primary_topic), r.domain && "Domain: " + esc(r.domain), r.abstract_source && "Abstract from " + esc(r.abstract_source), r.match_method && "Matched by " + esc(r.match_method)].filter(Boolean).join(" · ")}</div></div>` : ""}
+        ${kwAll.length > 3 ? `<div class="kws" style="margin-top:10px">${kwAll.map(w => `<button type="button" class="kwt" data-kw="${esc(w)}">${hl(w, ws)}</button>`).join("")}</div>` : ""}
+        <div class="src">${[r.field && "Field: " + esc(r.field) + (r.subfield ? " › " + esc(r.subfield) : ""), r.fwci !== "" && r.fwci != null && "FWCI " + esc(r.fwci) + " (1 = world average)", r.primary_topic && "Topic: " + esc(r.primary_topic), r.domain && "Domain: " + esc(r.domain), r.abstract_source && "Abstract from " + esc(r.abstract_source), r.match_method && "Matched by " + esc(r.match_method)].filter(Boolean).join(" · ")}</div></div>` : ""}
     </article>`;
   }).join("") || '<div class="card hint">No papers match these filters.</div>';
   $("pageText").textContent = `Page ${S.page + 1} of ${pages}`;
@@ -1354,6 +1385,7 @@ $("list").addEventListener("click", e => {
   const kw = e.target.closest(".kwt");
   if (kw){ toggleFacet("kw", kw.dataset.kw); return; }
   if (e.target.closest(".tog")){ S.expanded.has(k) ? S.expanded.delete(k) : S.expanded.add(k); renderList(); return; }
+  if (e.target.closest(".menupop a,.menupop button")) setTimeout(() => e.target.closest("details.more")?.removeAttribute("open"), 600);
   if (e.target.closest(".asseed")){ useAsSeed(k, e.target.closest(".asseed")); return; }
   if (e.target.closest(".copy")){
     const r = S.records.find(x => x._key === k); const t = r.abstract || r.scholar_snippet || r.tldr;
@@ -1483,6 +1515,7 @@ function setMark(k, el){
   const key = markKey(r), old = findMark(r), cur = old || {};
   for (const a of markAliases(r)) if (a !== key && old && MARKS[a] === old) MARKS[a] = { s:"", n:"", d: today(), t: Date.now() };   // move an older alias to the current key
   const s = el.classList.contains("mark") ? (MARK_VALUES.includes(el.value) ? el.value : "") : (cur.s || "");
+  if (el.classList.contains("mark")) el.classList.toggle("set", !!s);
   const n = el.classList.contains("mnote") ? String(el.value).slice(0, 300) : (cur.n || "");
   MARKS[key] = { s, n, d: today(), t: Date.now() };   // an empty entry records a removal, so it syncs too
   r.mark = s; r.mark_note = n; saveMarks();
@@ -2363,17 +2396,18 @@ function renderPaperSummary(){
   }
   if (info.oaUrl) facts.push(`<b>Free to read:</b> <a href="${esc(info.oaUrl)}" target="_blank" rel="noopener noreferrer">open-access copy ↗</a>`);
   parts.push(`<div class="meta" style="display:grid;gap:3px">${facts.map(f => `<div>${f}</div>`).join("")}</div>`);
+  const more = [];   // folded under “More about this paper”
   const yrs = info.byYear.slice(-10);
   if (yrs.length >= 2){
     const max = Math.max(1, ...yrs.map(c => c.n));
-    parts.push(`<div><div class="lab">Citations per year</div><div class="bars" style="width:${yrs.length * 27}px" role="img" aria-label="${esc(yrs.map(c => c.y + ": " + c.n).join(", "))}">${yrs.map(c => `<span style="height:${Math.max(4, Math.round(100 * c.n / max))}%" title="${c.y}: ${fmt(c.n)}"></span>`).join("")}</div><div class="yl" style="width:${yrs.length * 27}px"><span>${yrs[0].y}</span><span>${yrs[yrs.length - 1].y}</span></div></div>`);
+    more.push(`<div><div class="lab">Citations per year</div><div class="bars" style="width:${yrs.length * 27}px" role="img" aria-label="${esc(yrs.map(c => c.y + ": " + c.n).join(", "))}">${yrs.map(c => `<span style="height:${Math.max(4, Math.round(100 * c.n / max))}%" title="${c.y}: ${fmt(c.n)}"></span>`).join("")}</div><div class="yl" style="width:${yrs.length * 27}px"><span>${yrs[0].y}</span><span>${yrs[yrs.length - 1].y}</span></div></div>`);
   }
   const cb = citedBy(s);
   if (cb){
-    parts.push(`<div><div class="lab">Who cites it (from the ${fmt(cb.n)} citing papers loaded)</div>${cb.fields.length ? `<p>Mostly ${esc(cb.fields.join(", "))}.</p>` : ""}${cb.top.length ? `<p class="meta" style="margin-top:4px">Most-cited papers citing it:</p><ol class="meta">${cb.top.map(r => `<li>${esc(r.title)}${r.year ? ` (${esc(r.year)})` : ""} · cited ${fmt(Number(r.cited_by_count) || 0)}</li>`).join("")}</ol>` : ""}</div>`);
+    more.push(`<div><div class="lab">Who cites it (from the ${fmt(cb.n)} citing papers loaded)</div>${cb.fields.length ? `<p>Mostly ${esc(cb.fields.join(", "))}.</p>` : ""}${cb.top.length ? `<p class="meta" style="margin-top:4px">Most-cited papers citing it:</p><ol class="meta">${cb.top.map(r => `<li>${esc(r.title)}${r.year ? ` (${esc(r.year)})` : ""} · cited ${fmt(Number(r.cited_by_count) || 0)}</li>`).join("")}</ol>` : ""}</div>`);
   }
-  if (info.abstract) parts.push(`<details${!ai?.text && !info.tldr ? " open" : ""}><summary>Abstract (${esc(info.absSrc)})</summary><p>${esc(info.abstract)}</p></details>`);
-  if (info.abstract){ if (info.shortOnly) parts.push(`<div class="row"><span class="hint">Only a short abstract was found. Semantic Scholar, which may have a longer one, couldn't be reached (it may be busy).</span><button class="btn small ghost" id="sumRetry">Try again</button></div>`); }
+  if (info.abstract) more.push(`<div><div class="lab">Abstract (${esc(info.absSrc)})</div><p>${esc(info.abstract)}</p></div>`);
+  if (info.abstract){ if (info.shortOnly) more.push(`<div class="row"><span class="hint">Only a short abstract was found. Semantic Scholar, which may have a longer one, couldn't be reached (it may be busy).</span><button class="btn small ghost" id="sumRetry">Try again</button></div>`); }
   else if (info.done && info.failed) parts.push(`<div class="row"><span class="hint">Couldn't load all the details (the free services may be busy).</span><button class="btn small ghost" id="sumRetry">Try again</button></div>`);
   else if (info.done) parts.push(`<p class="hint">No abstract is available for this paper in OpenAlex or Semantic Scholar.</p>`);
   if (info.done){
@@ -2388,12 +2422,14 @@ function renderPaperSummary(){
         `<a class="btn small ghost" href="https://chatgpt.com/?q=${q}" target="_blank" rel="noopener noreferrer">Open in ChatGPT ↗</a>`,
         `<button class="btn small ghost" id="sumCopy">Copy prompt</button>`);
       parts.push(`<div><div class="lab">Summarize with AI</div><div class="row" style="gap:6px;flex-wrap:wrap">${btns.join("")}</div>
-        <div class="hint" style="margin-top:4px">“Open in…” gives the title and abstract to your own Claude or ChatGPT account in a new tab (a free account works).${dev ? ` “Summarize on this device” runs Chrome's free built-in AI${SUM.dev !== "available" ? ", which Chrome downloads once the first time" : ""}.` : ""} “Copy prompt” is for any other AI.</div></div>`);
+        <div class="hint" style="margin-top:4px">“Open in…” uses your own Claude or ChatGPT account (a free one works).${dev ? ` “Summarize on this device” runs Chrome's free built-in AI${SUM.dev !== "available" ? ", which Chrome downloads once the first time" : ""}.` : ""} “Copy prompt” is for any other AI.</div></div>`);
     }
   }
+  if (more.length) parts.push(`<details class="psum-more"${SUM.moreOpen ? " open" : ""}><summary>More about this paper: ${[yrs.length >= 2 && "citations per year", cb && "who cites it", info.abstract && "abstract"].filter(Boolean).join(", ")}</summary><div class="psum-more-body">${more.join("")}</div></details>`);
   const html = parts.join("");
   if (box.dataset.sig === html) return;
   box.dataset.sig = html; box.innerHTML = html;
+  box.querySelector(".psum-more")?.addEventListener("toggle", e => { SUM.moreOpen = e.target.open; box.dataset.sig = ""; });
   const pick = $("sumPick"); if (pick) pick.onchange = e => { SUM.pick = e.target.value; renderPaperSummary(); };
   const btn = $("sumAi"); if (btn) btn.onclick = () => aiSummarize(s);
   const rt = $("sumRetry"); if (rt) rt.onclick = () => { SUM.info.delete(s.id); renderPaperSummary(); };
@@ -2484,3 +2520,38 @@ async function deviceSummarize(s){
   SUM.ai.set(s.id, out); SUM.busy.delete(s.id); SUM.devProgress = null; renderPaperSummary();
 }
 checkDevice();
+
+
+/* ================= toolbar: Filters panel, menus, Breakdown memory ================= */
+function updateFilterCount(){
+  const n = ["y0","y1","markFilter","ctxFilter","minSeeds","foundIn"].filter(id => $(id).value).length
+    + ["hasAbs","noSelf","onlyNew","notZot"].filter(id => $(id).checked).length;
+  $("fcount").textContent = n; $("fcount").classList.toggle("hidden", !n);
+}
+$("filtersBtn").onclick = () => {
+  const open = $("moreFilters").classList.toggle("hidden") === false;
+  $("filtersBtn").setAttribute("aria-expanded", String(open));
+  if (open) $("y0").focus();
+};
+// Close an open ⋯ / More menu when clicking elsewhere or pressing Escape.
+document.addEventListener("click", e => {
+  document.querySelectorAll("details.menu[open], details.more[open]").forEach(d => { if (!d.contains(e.target)) d.removeAttribute("open"); });
+});
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  document.querySelectorAll("details.menu[open], details.more[open]").forEach(d => { d.removeAttribute("open"); d.querySelector("summary")?.focus(); });
+});
+// A paper's ⋯ menu opens towards whichever side has room, so it never runs off the screen.
+document.addEventListener("toggle", e => {
+  const d = e.target; if (!(d instanceof HTMLDetailsElement) || !d.matches("details.more") || !d.open) return;
+  const pop = d.querySelector(".menupop"); if (!pop) return;
+  pop.style.left = "0"; pop.style.right = "auto";
+  const r = pop.getBoundingClientRect();
+  if (r.right > document.documentElement.clientWidth - 8){ pop.style.left = "auto"; pop.style.right = "0"; }
+}, true);
+// Toolbar menu items close the menu once used.
+document.querySelectorAll(".acts2 .menupop .btn").forEach(b => b.addEventListener("click", () => b.closest("details")?.removeAttribute("open")));
+// Remember whether the Breakdown section is open (this browser only).
+try { if (store.get("breakdown") === "1") $("breakdown").open = true; } catch(e){}
+$("breakdown").addEventListener("toggle", () => { try { store.set("breakdown", $("breakdown").open ? "1" : "0"); } catch(e){} if ($("breakdown").open && S.records.length) renderYear(); });
+updateRunOptsSummary();

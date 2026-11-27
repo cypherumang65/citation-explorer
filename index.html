@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.openalex.org https://api.crossref.org https://api.semanticscholar.org https://api.zotero.org https://api.anthropic.com; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.openalex.org https://api.crossref.org https://api.semanticscholar.org https://api.zotero.org https://api.anthropic.com https://api.opencitations.net; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22%3E%3Crect width=%2224%22 height=%2224%22 rx=%226%22 fill=%22%232952cc%22/%3E%3Cg fill=%22none%22 stroke=%22white%22 stroke-width=%222%22%3E%3Ccircle cx=%227%22 cy=%227%22 r=%222.2%22/%3E%3Ccircle cx=%2217%22 cy=%227%22 r=%222.2%22/%3E%3Ccircle cx=%2212%22 cy=%2217.5%22 r=%222.2%22/%3E%3Cpath d=%22M8.4 9l2.6 6.4M15.6 9L13 15.4%22/%3E%3C/g%3E%3C/svg%3E">
 <title>Citation Explorer</title>
@@ -494,6 +494,8 @@ body:has(#seedCard:not(.hidden)) #q{min-height:46px}
 .srcrow{display:flex;gap:8px;align-items:center;margin-top:10px;min-width:0;flex-wrap:wrap}
 .srcrow .seg{max-width:100%}
 @media (max-width:640px){.srcrow{flex-direction:column;align-items:stretch}.srcrow .seg{width:100%}.srcrow .seg label{flex:1;justify-content:center;padding:6px 6px}}
+
+.keyhelp{outline:2px solid var(--accent);outline-offset:6px;border-radius:6px}
 </style>
 </head>
 <body>

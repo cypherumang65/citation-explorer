@@ -496,6 +496,9 @@ body:has(#seedCard:not(.hidden)) #q{min-height:46px}
 @media (max-width:640px){.srcrow{flex-direction:column;align-items:stretch}.srcrow .seg{width:100%}.srcrow .seg label{flex:1;justify-content:center;padding:6px 6px}}
 
 .keyhelp{outline:2px solid var(--accent);outline-offset:6px;border-radius:6px}
+
+.enrichbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px;padding:10px 14px;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:var(--r-md);background:var(--panel);font-size:13px}
+.enrichbar span{flex:1 1 260px}
 </style>
 </head>
 <body>
@@ -659,6 +662,7 @@ body:has(#seedCard:not(.hidden)) #q{min-height:46px}
 
 <section id="results" class="hidden">
   <div class="msg warn hidden" id="staleNote" style="margin:0 0 14px">The paper list changed. These results are for the previous list: press “Get citations” to update them.</div>
+  <div class="enrichbar hidden" id="enrichBar"><span id="enrichText"></span><button class="btn small primary" id="enrichBtn">Add fields &amp; topics</button></div>
   <div class="tiles" id="tiles"></div>
   <nav class="ltabs" role="tablist" id="ltabs" aria-label="Review views">
     <button role="tab" data-v="papers" aria-selected="true">Papers</button>

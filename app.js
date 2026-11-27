@@ -1249,7 +1249,7 @@ function canFallBack(e){ return e && (e.status === 429 || e.status >= 500 || e.n
 function friendlyError(e){
   if (e.user) return e.message;
   if (e.status === 429 && /semanticscholar/.test(e.url || "")) return "Semantic Scholar is busy right now (too many requests). Try again in a minute, or add a free Semantic Scholar key in ⚙ Settings.";
-  if (e.status === 429) return "OpenAlex's free daily limit for your network is used up (everyone on the same Wi-Fi shares it). Choose Semantic Scholar under Database, add a free OpenAlex key in ⚙ Settings (openalex.org/settings/api), or try again tomorrow.";
+  if (e.status === 429) return "OpenAlex's free daily limit for your network is used up (everyone on the same Wi-Fi shares it). Choose Auto or Semantic Scholar under “Search in”, add a free OpenAlex key in ⚙ Settings (openalex.org/settings/api), or try again tomorrow.";
   if (e.status === 401 && /openalex/i.test(e.message + "")) return "OpenAlex rejected the request (check the OpenAlex key in Settings).";
   return e.message || String(e);
 }
@@ -1354,7 +1354,7 @@ function countBy(list, get){
   const m = new Map(); for (const r of list) for (const v of get(r)) if (v) m.set(v, (m.get(v) || 0) + 1);
   return [...m.entries()].sort((a, b) => b[1] - a[1]);
 }
-function renderAll(){ renderTiles(); renderYear(); renderFacets(); renderActive(); renderList(); renderLit(); renderPaperSummary(); }
+function renderAll(){ renderEnrichBar(); renderTiles(); renderYear(); renderFacets(); renderActive(); renderList(); renderLit(); renderPaperSummary(); }
 function renderTiles(){
   const v = S.view, all = S.records;
   let y0 = Infinity, y1 = -Infinity; for (const r of v){ const y = Number(r.year); if (y){ if (y < y0) y0 = y; if (y > y1) y1 = y; } }
@@ -2900,3 +2900,44 @@ async function resolveViaCrossref(it, signal){
     authorships: au.map(n => ({ author: { display_name: n } })), primary_location: { source: { display_name: item["container-title"]?.[0] || "" } }, type: "article", referenced_works: [], referenced_works_count: null, counts_by_year: [] };
   return { label: it.entry?.title || it.id || it.text || w.display_name, works: [w], pre: new Set([w.id]), auto: true };
 }
+
+
+/* ================= "Add fields & topics": fill in OpenAlex's classification for papers from the backups ================= */
+const ENRICH_SELECT = "id,doi,primary_topic,topics,keywords,abstract_inverted_index,authorships,fwci,citation_normalized_percentile,counts_by_year,open_access,language";
+const needsFields = r => r.doi && !r.primary_topic && !r.openalex_id;
+function renderEnrichBar(){
+  const n = S.records.filter(needsFields).length;
+  $("enrichBar").classList.toggle("hidden", !n);
+  if (n) $("enrichText").textContent = `${fmt(n)} papers came from the backup databases, so they have no subfields, topics or keywords yet. OpenAlex can add them (about ${fmt(Math.ceil(n / 50))} requests).`;
+}
+$("enrichBtn").onclick = async () => {
+  const recs = S.records.filter(needsFields); if (!recs.length) return;
+  const signal = begin("Adding fields & topics from OpenAlex…"); if (!signal) return;
+  const byDoi = new Map(recs.map(r => [r.doi.toLowerCase(), r]));
+  const dois = [...byDoi.keys()].filter(d => !/[|,]/.test(d));
+  const chunks = []; for (let i = 0; i < dois.length; i += 50) chunks.push(dois.slice(i, i + 50));
+  let done = 0, filled = 0, err = null;
+  try {
+    await pool(chunks, 4, async chunk => {
+      if (err) return; abortIf(signal);
+      let res = [];
+      try { res = (await getJSON(oaUrl("/works", { filter: "doi:" + chunk.join("|"), "per-page": 50, select: ENRICH_SELECT }), { signal }, 3)).results || []; }
+      catch(e){ if (e.name === "AbortError") throw e; err = err || e; return; }
+      for (const w of res){
+        const r = byDoi.get(bareDoi(w.doi).toLowerCase()); if (!r) continue;
+        const f = toRecord(w);   // OpenAlex's view of the same paper
+        for (const k of ["openalex_id","domain","field","subfield","primary_topic","all_topics","keywords","fwci","percentile","top","recent_cites","open_access","oa_url","language"]) if (f[k] !== "" && f[k] != null) r[k] = f[k];
+        if (!r.abstract && f.abstract){ r.abstract = f.abstract; r.abstract_source = "OpenAlex"; }
+        if (!r._aids.some(Boolean)){ r._aids = f._aids; r._anames = f._anames; r._inst = f._inst; r.institutions = f.institutions; r.countries = f.countries; }
+        r._found.add("OpenAlex"); filled++;
+      }
+      done += chunk.length; progress(done, dois.length, `OpenAlex: classified ${fmt(filled)} of ${fmt(done)} papers…`);
+    });
+  } catch(e){ if (e.name !== "AbortError") err = err || e; }
+  finally { end(); }
+  for (const r of S.records) r.found_in = [...r._found].join(" + ");
+  buildNames(); applyFilters();
+  if (filled) note(`Added fields, subfields, topics and keywords to ${fmt(filled)} papers from OpenAlex.` + (err ? " OpenAlex stopped part-way; press the button again later for the rest." : ""), "ok");
+  else if (err){ msg(friendlyError(err), "err"); if (/OpenAlex key/.test(friendlyError(err))) openKeyHelp(); }
+  else note("OpenAlex doesn't have these papers' DOIs, so no fields could be added.", "warn");
+};

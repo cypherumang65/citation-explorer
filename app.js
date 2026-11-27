@@ -114,8 +114,76 @@ async function pool(items, n, fn){
   await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length){ const k = i++; await fn(items[k], k); } }));
 }
 
+/* ---------------- browser cache for OpenAlex answers (fast repeats, kept small) ----------------
+   Whole searches and single-paper lookups are kept for 24 hours in this browser only (IndexedDB), so a
+   repeat costs no OpenAlex requests; that keeps people on a shared network (campus Wi-Fi) inside the free
+   daily limit. Limits keep it fast: at most 60 entries / ~40 MB, oldest removed first; every cache step
+   gives up after 1.5 s, so the cache can never make a search slower. API keys are never part of a key. */
+const OACACHE = { db: null, ttl: 24 * 3600 * 1000, maxN: 60, maxBytes: 40e6, hits: 0 };
+function oaCacheKey(url){ try { const u = new URL(url); u.searchParams.delete("api_key"); return u.toString(); } catch(e){ return ""; } }
+const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() => r(null), ms))]);
+function oaCacheOpen(){
+  if (OACACHE.db !== null) return OACACHE.db;
+  OACACHE.db = withTimeout(new Promise(res => {
+    try {
+      const rq = indexedDB.open("ce_oa_cache2", 1);
+      rq.onupgradeneeded = () => { rq.result.createObjectStore("r"); rq.result.createObjectStore("m"); };
+      rq.onsuccess = () => res(rq.result); rq.onerror = () => res(null); rq.onblocked = () => res(null);
+    } catch(e){ res(null); }
+  }), 1500);
+  try { indexedDB.deleteDatabase("ce_oa_cache"); } catch(e){}   // remove the first, per-page version
+  return OACACHE.db;
+}
+async function oaCacheGet(key){
+  const db = await oaCacheOpen(); if (!db || !key) return null;
+  return withTimeout(new Promise(res => { try {
+    const rq = db.transaction("r").objectStore("r").get(key);
+    rq.onsuccess = () => { const v = rq.result; res(v && Date.now() - v.t < OACACHE.ttl ? v : null); }; rq.onerror = () => res(null);
+  } catch(e){ res(null); } }), 1500);
+}
+async function oaCachePut(key, j){
+  const db = await oaCacheOpen(); if (!db || !key) return;
+  let n = 0; try { n = JSON.stringify(j).length; } catch(e){ return; }
+  if (n > 15e6) return;   // one huge answer isn't worth keeping
+  try {
+    const tx = db.transaction(["r", "m"], "readwrite"), t = Date.now();
+    tx.objectStore("r").put({ t, j }, key); tx.objectStore("m").put({ t, n }, key);
+    tx.oncomplete = () => oaCachePrune(db);
+  } catch(e){}
+}
+function oaCachePrune(db){
+  // reads only the small size list, never the stored answers
+  try {
+    const tx = db.transaction(["r", "m"], "readwrite"), m = tx.objectStore("m"), r = tx.objectStore("r"), rows = [];
+    const cur = m.openCursor();
+    cur.onsuccess = () => {
+      const c = cur.result; if (c){ rows.push([c.key, c.value?.t || 0, c.value?.n || 0]); c.continue(); return; }
+      const now = Date.now(); rows.sort((a, b) => a[1] - b[1]);
+      let bytes = rows.reduce((x, y) => x + y[2], 0), count = rows.length;
+      for (const [k, t, n] of rows){
+        if (now - t > OACACHE.ttl || count > OACACHE.maxN || bytes > OACACHE.maxBytes){ m.delete(k); r.delete(k); count--; bytes -= n; }
+      }
+    };
+  } catch(e){}
+}
+async function oaCacheClear(){
+  const db = await oaCacheOpen(); if (!db) return false;
+  return new Promise(res => { try { const tx = db.transaction(["r", "m"], "readwrite"); tx.objectStore("r").clear(); tx.objectStore("m").clear(); tx.oncomplete = () => res(true); tx.onerror = () => res(false); } catch(e){ res(false); } });
+}
+const abortIf = signal => { if (signal?.aborted) throw new DOMException("Aborted", "AbortError"); };
+
 /* ---------------- HTTP with retries ---------------- */
 async function getJSON(url, opts = {}, tries = 5){
+  abortIf(opts.signal);
+  // single-paper and search lookups are cached by URL; paged lists are cached as whole searches in fetchOA
+  const cacheable = typeof url === "string" && url.startsWith(OA + "/") && !opts.method && !/[?&](page|cursor)=/.test(url);
+  const ck = cacheable ? oaCacheKey(url) : "";
+  if (ck){ const hit = await oaCacheGet(ck); abortIf(opts.signal); if (hit){ OACACHE.hits++; return hit.j; } }
+  const j = await getJSONLive(url, opts, tries);
+  if (ck && j) oaCachePut(ck, j);
+  return j;
+}
+async function getJSONLive(url, opts = {}, tries = 5){
   let wait = 1500;
   for (let i = 0; ; i++){
     let r;
@@ -123,18 +191,18 @@ async function getJSON(url, opts = {}, tries = 5){
     catch(e){
       if (e.name === "AbortError") throw e;
       if (i >= tries - 1) { const er = new Error("Network error — check your connection (" + e.message + ")"); er.network = true; throw er; }
-      await sleep(wait, opts.signal); wait *= 2; continue;
+      await sleep(wait * (0.75 + Math.random() * 0.5), opts.signal); wait *= 2; continue;
     }
     if (r.ok) return r.json();
     if ((r.status === 429 || r.status >= 500) && i < tries - 1){
       const ra = Number(r.headers.get("Retry-After"));
-      await sleep(ra > 0 && ra < 90 ? ra * 1000 : wait, opts.signal); wait *= 2; continue;
+      await sleep((ra > 0 && ra < 90 ? ra * 1000 : wait) * (0.75 + Math.random() * 0.5), opts.signal); wait *= 2; continue;
     }
     let body = "", detail = "";
     try { body = await r.text(); const j = JSON.parse(body); detail = j.error || j.message || ""; } catch(e){ detail = body.slice(0, 200); }
     if (typeof detail !== "string") detail = JSON.stringify(detail).slice(0, 200);
     const er = new Error(`HTTP ${r.status}${detail ? ": " + detail : ""}`);
-    er.status = r.status; er.detail = detail; throw er;
+    er.status = r.status; er.detail = detail; er.url = String(url); throw er;
   }
 }
 function oaUrl(path, params){
@@ -156,7 +224,7 @@ async function checkProxy(){
     catch(e){ S.proxy = false; }
   }
   const keyed = S.proxy && (S.proxyKey || !!$("serpkey").value.trim());
-  $("scholarPill").classList.toggle("hidden", HOSTED); $("srcWrap").classList.toggle("hidden", HOSTED);
+  $("scholarPill").classList.toggle("hidden", HOSTED); document.querySelectorAll("#srcWrap .gsopt").forEach(l => l.classList.toggle("hidden", HOSTED));
   dot.className = "dot " + (keyed ? "on" : "off");
   pill.textContent = keyed ? "Google Scholar: ready" : S.proxy ? "Google Scholar: add SerpApi key" : HOSTED ? "Google Scholar: desktop version only" : "Google Scholar: start server.py";
   $("scholarPill").title = keyed ? "Scholar's Cited-by lists are fetched through SerpApi" :
@@ -393,7 +461,8 @@ function parseInput(raw){
 
 /* ---------------- resolve a pasted item to OpenAlex work(s) ---------------- */
 const IMPACT = ",fwci,citation_normalized_percentile,counts_by_year";
-const SEED_SELECT = "id,display_name,doi,publication_year,cited_by_count,referenced_works_count,referenced_works,authorships,primary_location,type" + IMPACT;
+const SEED_SELECT_LITE = "id,display_name,doi,publication_year,cited_by_count,referenced_works_count,referenced_works,authorships,primary_location,type" + IMPACT;   // bulk lists: no abstracts
+const SEED_SELECT = "id,display_name,doi,publication_year,cited_by_count,referenced_works_count,referenced_works,authorships,primary_location,type,abstract_inverted_index,primary_topic,keywords,open_access" + IMPACT;
 const LIST_SELECT = "id,doi,display_name,publication_year,publication_date,type,cited_by_count,authorships,is_authors_truncated,primary_location,open_access,primary_topic,topics,keywords,abstract_inverted_index,language" + IMPACT;
 const oaWork = (path, signal) => getJSON(oaUrl(path, { select:SEED_SELECT }), { signal });
 async function oaSearch(q, n, signal, select = SEED_SELECT){
@@ -550,11 +619,12 @@ async function resolveItem(it, signal){
 function seedFromWork(w, scholar){
   const au = (w.authorships || []).map(a => a.author?.display_name).filter(Boolean);
   const last = (au[0] || "").split(" ").pop() || "Paper";
-  return { id: w.id, oaId: w.id.startsWith("scholar:") ? null : shortId(w.id), title: w.display_name || "(untitled)", year: w.publication_year || "",
+  return { id: w.id, oaId: w.id.startsWith("scholar:") || w.id.startsWith("s2:") ? null : shortId(w.id), s2: w.id.startsWith("s2:"), title: w.display_name || "(untitled)", year: w.publication_year || "",
     authors: au, authorIds: new Set((w.authorships || []).map(a => a.author?.id).filter(Boolean)),
     venue: w.primary_location?.source?.display_name || "", type: w.type || "", cited: w.cited_by_count || 0,
     refs: w.referenced_works_count, doi: bareDoi(w.doi), label: `${last} ${w.publication_year || ""}`.trim(), scholar: scholar || null,
-    refSet: new Set((w.referenced_works || []).map(shortId)), impact: impactOf(w) };
+    refSet: new Set((w.referenced_works || []).map(shortId)), impact: impactOf(w),
+    _sum: "abstract_inverted_index" in w ? { abstract_inverted_index: w.abstract_inverted_index, primary_topic: w.primary_topic, keywords: w.keywords, open_access: w.open_access, counts_by_year: w.counts_by_year } : null };
 }
 let groupSeq = 0;
 function addSeeds(works, scholar){
@@ -576,7 +646,7 @@ function renderSeeds(){
     return `<div class="seed"><span class="n">${esc(s.label)}</span><div class="grow">
       <div class="ttl">${s.type === "preprint" ? '<span class="badge pre">preprint</span>' : ""}${s.version ? '<span class="badge">other version</span>' : ""}${esc(s.title)}</div>
       <div class="meta">${esc([au, s.year, s.venue].filter(Boolean).join(" · "))}</div>
-      <div class="meta">${s.oaId ? `OpenAlex: cited by ${fmt(s.cited)}${s.impact?.recent_cites !== "" && s.impact?.recent_cites != null ? ` (${fmt(s.impact.recent_cites)} in the last 2 years)` : ""} · ${s.impact?.fwci !== "" && s.impact?.fwci != null ? `<span title="Field-weighted citation impact: 1 = world average">FWCI ${esc(s.impact.fwci)}</span>${s.impact.top ? " · " + esc(s.impact.top) : ""} · ` : ""}${s.refs ?? "?"} references` : "Not in OpenAlex (Scholar only)"}${s.scholar?.total ? ` · Scholar: cited by ${fmt(s.scholar.total)}` : ""}${s.doi ? ` · <a href="https://doi.org/${esc(s.doi)}" target="_blank" rel="noopener noreferrer">${esc(s.doi)}</a>` : ""} · <a href="${esc(scholarSearch(s.title))}" target="_blank" rel="noopener noreferrer">Open in Google Scholar ↗</a></div>
+      <div class="meta">${s.oaId ? `OpenAlex: cited by ${fmt(s.cited)}${s.impact?.recent_cites !== "" && s.impact?.recent_cites != null ? ` (${fmt(s.impact.recent_cites)} in the last 2 years)` : ""} · ${s.impact?.fwci !== "" && s.impact?.fwci != null ? `<span title="Field-weighted citation impact: 1 = world average">FWCI ${esc(s.impact.fwci)}</span>${s.impact.top ? " · " + esc(s.impact.top) : ""} · ` : ""}${s.refs ?? "?"} references` : (s.s2 ? "From Semantic Scholar (OpenAlex wasn't available)" : "Not in OpenAlex (Scholar only)")}${s.scholar?.total ? ` · Scholar: cited by ${fmt(s.scholar.total)}` : ""}${s.doi ? ` · <a href="https://doi.org/${esc(s.doi)}" target="_blank" rel="noopener noreferrer">${esc(s.doi)}</a>` : ""} · <a href="${esc(scholarSearch(s.title))}" target="_blank" rel="noopener noreferrer">Open in Google Scholar ↗</a></div>
     </div><button class="btn small ghost x" data-i="${i}" title="Remove">✕</button></div>`;
   }).join("");
   $("seedList").querySelectorAll(".x").forEach(b => b.onclick = () => { if (S.busy) return; S.seeds.splice(+b.dataset.i, 1); renderSeeds(); });
@@ -591,9 +661,10 @@ function updateSourceUI(){
   const ready = scholarReady();
   for (const v of ["gs","both"]){ const inp = document.querySelector(`input[name=src][value=${v}]`); inp.disabled = !ready || dir === "refs"; }
   const src = document.querySelector("input[name=src]:checked");
-  if (src.disabled){ document.querySelector("input[name=src][value=oa]").checked = true; }
+  if (src.disabled){ document.querySelector("input[name=src][value=auto]").checked = true; }
   const s = document.querySelector("input[name=src]:checked").value;
-  $("gsMaxWrap").classList.toggle("hidden", s === "oa"); $("cacheWrap").classList.toggle("hidden", s === "oa");
+  const usesGS = s === "gs" || s === "both";
+  $("gsMaxWrap").classList.toggle("hidden", !usesGS); $("cacheWrap").classList.toggle("hidden", !usesGS);
   const scholarOnly = S.seeds.some(x => !x.oaId);
   $("srcHint").textContent = dir === "refs" ? "Reference lists come from OpenAlex (Google Scholar doesn't provide them)." :
     !ready ? (S.proxy ? "To use Google Scholar, add your SerpApi key in ⚙ Settings. " : HOSTED ? "Google Scholar is available only in the desktop version. " : "To use Google Scholar, start the page with  python3 server.py  (or the Start Citation Explorer launcher) and add a SerpApi key. ") +
@@ -601,14 +672,17 @@ function updateSourceUI(){
     s === "gs" ? "Scholar's Cited-by list via SerpApi: 1 search per 20 papers, then each paper is matched to OpenAlex/Crossref for its abstract, field and keywords." :
     s === "both" ? "Fetches both and merges them. The found_in column shows which source found each paper." :
     (scholarOnly ? "Some papers are only on Google Scholar; they'll be fetched from Scholar (the source switches to Both). " : "") + "OpenAlex: free and fast, with abstracts and topics. Choose Google Scholar or Both if you need Scholar's (usually larger) list.";
-  if (HOSTED) $("srcHint").textContent = dir === "refs" ? "Reference lists come from OpenAlex." : "";   // the website only uses OpenAlex
+  if (HOSTED) $("srcHint").textContent = "";
+  const sv = document.querySelector("input[name=src]:checked")?.value;
+  if (sv === "auto") $("srcHint").textContent = "";
+  if (sv === "s2") $("srcHint").textContent = "Semantic Scholar: free and needs a DOI. It has no research fields or topics, so Breakdown and the Topics tab are emptier. Without a key it can be slow when busy.";
+  if (sv === "oas2") $("srcHint").textContent = "Fetches from OpenAlex and Semantic Scholar and merges them; the found_in column shows which found each paper.";
   updateRunOptsSummary();
 }
 function updateRunOptsSummary(){
   const src = document.querySelector("input[name=src]:checked")?.value || "oa";
   const oaCap = fmt(Number($("maxn").value) || 0), gsCap = fmt(Number($("gsmax").value) || 0);
-  const parts = [src === "gs" ? "Google Scholar" : src === "both" ? "OpenAlex + Scholar" : "OpenAlex",
-    src === "gs" ? "up to " + gsCap : src === "both" ? `up to ${oaCap} (OpenAlex) / ${gsCap} (Scholar)` : "up to " + oaCap,
+  const parts = [src === "gs" ? "up to " + gsCap : src === "both" ? `up to ${oaCap} (OpenAlex) / ${gsCap} (Scholar)` : "up to " + oaCap,
     $("keep").value === "new" ? "newest" : "most cited"];
   const ex = [$("useS2").checked && "fill abstracts", $("useCtx").checked && "citing sentences", $("useCocite").checked && "often cited alongside"].filter(Boolean);
   $("runOptsSum").textContent = "Options: " + parts.join(" · ") + (ex.length ? " · " + ex.join(", ") : "");
@@ -667,7 +741,14 @@ async function find(mode){
     for (let i = 0; i < items.length; i++){
       progress(i, items.length, items.length > 1 ? `Paper ${i + 1} of ${items.length}` : "");
       try {
-        const r = await resolveItem(items[i], signal);
+        let r;
+        try { r = await resolveItem(items[i], signal); }
+        catch(e){
+          const db = document.querySelector("input[name=src]:checked")?.value;
+          if (e.name === "AbortError" || !(db === "auto" || db === "s2" || db === "oas2") || !canFallBack(e)) throw e;
+          r = await resolveViaS2(items[i], signal);
+          S.viaS2Note = true;
+        }
         if (r.auto) addSeeds(r.works.filter(w => r.pre.has(w.id)), r.scholar); else groups.push(r);
       } catch(e){ if (e.name === "AbortError") throw e; problems.push((items.length > 1 ? `• ${String(items[i].entry?.title || items[i].id || items[i].text || "").slice(0, 80)}: ` : "") + (e.user ? e.message : friendlyError(e))); }
     }
@@ -760,17 +841,43 @@ function mergeInto(map, rec, source, seedLabel){
 async function fetchOA(seed, dir, maxN, keep, map, signal, tag, cocite){
   const filter = dir === "citing" ? `cites:${seed.oaId}` : `cited_by:${seed.oaId}`;
   const key = hasOAKey(); const limit = key ? maxN : Math.min(maxN, 10000);
-  let cursor = "*", pg = 1, total = null, got = 0, more = true;
-  while (more && got < limit){
-    const params = { filter, "per-page":200, select: LIST_SELECT + (cocite ? ",referenced_works" : ""), sort: keep === "new" ? "publication_date:desc" : "cited_by_count:desc" };
-    if (key) params.cursor = cursor; else params.page = pg++;
-    const r = await getJSON(oaUrl("/works", params), { signal });
-    if (total === null) total = r.meta?.count ?? 0;
-    for (const w of r.results || []){ if (got >= limit) break; mergeInto(map, toRecord(w), "OpenAlex", seed.label); got++; if (cocite) tallyCocite(w); }
-    progress(got, Math.min(total, limit), `${tag}OpenAlex: ${fmt(got)} of ${fmt(total)} ${dir === "citing" ? "citing papers" : "references"}`);
-    const n = (r.results || []).length;
-    if (key){ cursor = r.meta?.next_cursor; more = !!(n && cursor); } else more = n === 200 && (pg - 1) * 200 < 10000;
+  const params = p => ({ filter, "per-page":200, select: LIST_SELECT + (cocite ? ",referenced_works" : ""), sort: keep === "new" ? "publication_date:desc" : "cited_by_count:desc", ...p });
+  let total = null, got = 0;
+  const take = results => { for (const w of results || []){ if (got >= limit) break; mergeInto(map, toRecord(w), "OpenAlex", seed.label); got++; if (cocite) tallyCocite(w); } };
+  const show = () => progress(got, Math.min(total ?? 0, limit), `${tag}OpenAlex: ${fmt(got)} of ${fmt(total ?? 0)} ${dir === "citing" ? "citing papers" : "references"}`);
+  const runKey = oaCacheKey(oaUrl("/works", params({ limit_run: limit })));
+  const hit = await oaCacheGet(runKey); abortIf(signal);
+  if (hit && Array.isArray(hit.j?.results)){
+    total = hit.j.total; take(hit.j.results); show();
+    return { got, total: total ?? 0, capped: (total ?? 0) > got, cachedAt: new Date(hit.t).toTimeString().slice(0, 5) };
   }
+  const all = []; const keepAll = take, take2 = results => { for (const w of results || []) if (all.length < limit) all.push(w); keepAll(results); };
+  if (key){   // cursor paging must go one page after another
+    let cursor = "*", more = true;
+    while (more && got < limit){
+      const r = await getJSON(oaUrl("/works", params({ cursor })), { signal });
+      if (total === null) total = r.meta?.count ?? 0;
+      take2(r.results); show(); abortIf(signal);
+      const n = (r.results || []).length; cursor = r.meta?.next_cursor; more = !!(n && cursor);
+    }
+  } else {    // numbered pages: read page 1, then the rest 4 at a time (same number of requests, much less waiting)
+    const first = await getJSON(oaUrl("/works", params({ page: 1 })), { signal });
+    total = first.meta?.count ?? 0; take2(first.results); show();
+    const pages = Math.min(Math.ceil(Math.min(total, limit) / 200), 50);
+    const rest = []; for (let p = 2; p <= pages; p++) rest.push(p);
+    const byPage = new Map(); let next = 2;
+    let failed = null;
+    await pool(rest, 4, async p => {
+      if (failed || signal?.aborted) return;   // one failed page stops the others from starting
+      try { byPage.set(p, (await getJSON(oaUrl("/works", params({ page: p })), { signal })).results || []); }
+      catch(e){ failed = failed || e; return; }
+      while (byPage.has(next)){ take2(byPage.get(next)); byPage.delete(next); next++; }   // keep the API's order (most cited first)
+      show();
+    });
+    if (failed) throw failed;
+    abortIf(signal);
+  }
+  if (all.length) oaCachePut(runKey, { total, results: all });
   return { got, total: total ?? 0, capped: (total ?? 0) > got };
 }
 
@@ -962,31 +1069,54 @@ async function getCitations(){
   const dir = document.querySelector("input[name=dir]:checked").value;
   let src = document.querySelector("input[name=src]:checked").value;
   const pre = [];
-  const scholarOnly = S.seeds.filter(s => !s.oaId);
-  if (dir === "refs"){ src = "oa"; if (scholarOnly.length) pre.push(`Skipped ${[...new Set(scholarOnly.map(s => s.label))].join(", ")}: reference lists come from OpenAlex, and this paper is only on Google Scholar.`); }
-  else if (!scholarReady()){ src = "oa"; if (scholarOnly.length) pre.push(`Skipped ${[...new Set(scholarOnly.map(s => s.label))].join(", ")}: it's only on Google Scholar. Start server.py and add a SerpApi key to fetch it.`); }
+  const scholarOnly = S.seeds.filter(s => !s.oaId && !s.s2);
+  if (dir === "refs"){ if (src === "gs" || src === "both") src = "oa"; if (scholarOnly.length) pre.push(`Skipped ${[...new Set(scholarOnly.map(s => s.label))].join(", ")}: reference lists come from OpenAlex, and this paper is only on Google Scholar.`); }
+  else if (!scholarReady() && (src === "gs" || src === "both")){ src = "oa"; if (scholarOnly.length) pre.push(`Skipped ${[...new Set(scholarOnly.map(s => s.label))].join(", ")}: it's only on Google Scholar. Start server.py and add a SerpApi key to fetch it.`); }
   else if (src === "oa" && scholarOnly.length){ src = "both"; document.querySelector("input[name=src][value=both]").checked = true; updateSourceUI(); pre.push("Some papers are only on Google Scholar, so the source was switched to Both."); }
   const maxN = Math.max(1, parseInt($("maxn").value, 10) || 5000);
   const gsCap = Math.max(20, parseInt($("gsmax").value, 10) || 200);
   const keep = $("keep").value;
-  const useOA = src !== "gs", useGS = src !== "oa";
+  const autoDb = src === "auto";
+  const useOA = src === "oa" || src === "both" || src === "oas2" || autoDb, useGS = src === "gs" || src === "both", useS2db = src === "s2" || src === "oas2";
   const seeds = S.seeds.slice();
-  const oaSeeds = seeds.filter(s => s.oaId);
+  const oaSeeds = seeds.filter(s => s.oaId);   // papers found only through Semantic Scholar have no OpenAlex id
   const signal = begin(dir === "citing" ? "Collecting citing papers…" : "Collecting references…"); if (!signal) return;
   msg(""); note("");
   const map = new Map(); const notes = [...pre]; let err = null;
-  S.dir = dir; S.lastSources = new Set(); S.capped = false; S.gsCapped = false; S.origin = "seeds"; S.cacheOldest = null;
+  if (S.viaS2Note){ notes.push("OpenAlex wasn't available, so the paper was found through Semantic Scholar."); S.viaS2Note = false; }
+  S.dir = dir; S.lastSources = new Set(); S.capped = false; S.oaCachedAt = ""; S.gsCapped = false; S.origin = "seeds"; S.cacheOldest = null;
   S.runMaxN = maxN; S.runKeep = keep; S.runGsCap = useGS ? gsCap : "";
   S.cociteOn = $("useCocite").checked && dir === "citing" && useOA; S.cocite = new Map(); S.cociteSeen = new Set(); S.cociteBase = 0; S.cociteList = [];
   try {
+    // OpenAlex first (unless Semantic Scholar alone was chosen). In Auto or Both, a paper OpenAlex can't serve
+    // (limit reached, server error, network) is fetched from Semantic Scholar instead, and the run carries on.
+    const oaFailed = []; let oaErr = null;
     if (useOA && oaSeeds.length){
       for (let i = 0; i < oaSeeds.length; i++){
         const s = oaSeeds[i]; const tag = oaSeeds.length > 1 ? `[${i + 1}/${oaSeeds.length}] ` : "";
-        const r = await fetchOA(s, dir, maxN, keep, map, signal, tag, S.cociteOn);
-        if (r.capped){ S.capped = true; notes.push(`${s.label}${s.version ? " (other version)" : ""}: OpenAlex has ${fmt(r.total)}, fetched the ${keep === "new" ? "newest" : "most-cited"} ${fmt(r.got)}${!hasOAKey() && maxN > 10000 ? " (beyond 10,000 needs a free OpenAlex key)" : " (raise “Max papers” for more)"}.`); }
+        if (oaErr){ oaFailed.push(s); continue; }   // once OpenAlex is unavailable, don't keep asking it
+        try {
+          const r = await fetchOA(s, dir, maxN, keep, map, signal, tag, S.cociteOn);
+          if (r.capped){ S.capped = true; notes.push(`${s.label}${s.version ? " (other version)" : ""}: OpenAlex has ${fmt(r.total)}, fetched the ${keep === "new" ? "newest" : "most-cited"} ${fmt(r.got)}${!hasOAKey() && maxN > 10000 ? " (beyond 10,000 needs a free OpenAlex key)" : ""}.`); }
+          if (r.cachedAt) S.oaCachedAt = S.oaCachedAt && S.oaCachedAt < r.cachedAt ? S.oaCachedAt : r.cachedAt;
+          S.lastSources.add("OpenAlex");
+        } catch(e){
+          if (e.name === "AbortError" || !(autoDb || src === "oas2") || !canFallBack(e)) throw e;
+          oaErr = e; oaFailed.push(s);
+        }
       }
-      S.lastSources.add("OpenAlex");
     }
+    if (oaErr){
+      S.cociteOn = false;   // "often cited alongside" needs OpenAlex
+      notes.push(`OpenAlex wasn't available (${oaErr.status === 429 ? "its free daily limit for your network is used up" : "it didn't respond"}), so Semantic Scholar was used${oaFailed.length < oaSeeds.length ? " for the rest" : ""}. A free OpenAlex key in ⚙ Settings avoids the limit.`);
+    }
+    const s2Seeds = useS2db ? seeds : seeds.filter(x => oaFailed.includes(x) || (!x.oaId && x.s2));
+    if (s2Seeds.length){
+      try { const r = await fetchS2Cites(s2Seeds, dir, maxN, map, signal); notes.push(r.note); if (r.capped) S.capped = true; if (r.listed) S.lastSources.add("Semantic Scholar"); }
+      catch(e){ if (e.name === "AbortError") throw e; if (oaErr && !map.size) throw oaErr; notes.push("Semantic Scholar: " + friendlyError(e)); }
+    }
+    if (oaErr && !map.size) throw oaErr;
+    if (S.oaCachedAt) notes.push(`OpenAlex results came from this browser's memory (saved ${S.oaCachedAt}); nothing was downloaded again. Use “Clear cache” in ⚙ Settings to refresh.`);
     if (useGS){
       let groups = [...new Map(seeds.map(s => [s.label, seeds.filter(x => x.label === s.label)])).values()];
       const needLocate = groups.filter(g => !g.some(s => s.scholar?.cites));
@@ -1085,9 +1215,11 @@ function finish(map, notes, err, noun, runSeeds){
   applyFilters(); renderSeeds();
   if (S.records.length) $("results").scrollIntoView({ behavior:"smooth", block:"start" });
 }
+function canFallBack(e){ return e && (e.status === 429 || e.status >= 500 || e.network || /Network error/.test(e.message || "")); }
 function friendlyError(e){
   if (e.user) return e.message;
-  if (e.status === 429) return "Too many requests. The free daily OpenAlex budget may be used up; add a free OpenAlex key in Settings or try again later.";
+  if (e.status === 429 && /semanticscholar/.test(e.url || "")) return "Semantic Scholar is busy right now (too many requests). Try again in a minute, or add a free Semantic Scholar key in ⚙ Settings.";
+  if (e.status === 429) return "OpenAlex's free daily limit for your network is used up (everyone on the same Wi-Fi shares it). Choose Semantic Scholar under Database, add a free OpenAlex key in ⚙ Settings (openalex.org/settings/api), or try again tomorrow.";
   if (e.status === 401 && /openalex/i.test(e.message + "")) return "OpenAlex rejected the request (check the OpenAlex key in Settings).";
   return e.message || String(e);
 }
@@ -1148,6 +1280,7 @@ $("settingsBtn").onclick = () => { const h = $("settingsCard").classList.toggle(
 const words = () => $("filter").value.toLowerCase().split(/\s+/).filter(Boolean);
 function applyFilters(){
   const ws = words(); const y0 = parseInt($("y0").value, 10), y1 = parseInt($("y1").value, 10);
+  const sin = document.querySelector("input[name=sin]:checked")?.value || "all";
   const hasAbs = $("hasAbs").checked, noSelf = $("noSelf").checked, src = $("foundIn").value; const f = S.facet;
   const onlyNew = $("onlyNew").checked, notZot = $("notZot").checked, minK = parseInt($("minSeeds").value, 10) || 0, mf = $("markFilter").value, cf = $("ctxFilter").value;
   S.view = S.records.filter(r => {
@@ -1170,7 +1303,7 @@ function applyFilters(){
     if (mf === "unmarked" ? r.mark : mf === "keep" ? !["relevant","cite"].includes(r.mark) : mf === "noexcl" ? r.mark === "exclude" : mf ? r.mark !== mf : false) return false;
     if (cf === "ctx" ? !r._ctx.length : cf === "infl" ? r.influential !== "yes" : cf ? !r._intents.has(cf) : false) return false;
     if (ws.length){
-      const hay = (r.title + " " + r.abstract + " " + r.keywords + " " + r.all_topics + " " + r.authors + " " + r.venue + " " + r.tldr + " " + r.scholar_snippet + " " + r.cite_contexts + " " + r.mark_note).toLowerCase();
+      const hay = searchHay(r, sin);
       if (!ws.every(w => hay.includes(w))) return false;
     }
     return true;
@@ -1660,7 +1793,7 @@ async function resolveCocited(seeds, signal){
   const top = [...S.cocite.entries()].filter(([id, n]) => !seedIds.has(id) && n >= 2).sort((a, b) => b[1] - a[1]).slice(0, 50);
   if (!top.length){ S.cociteList = []; return "What am I missing: no work is cited by two or more of the citing papers."; }
   progress(0, 0, "Looking up the works most often cited alongside yours…");
-  const r = await getJSON(oaUrl("/works", { filter: "openalex:" + top.map(t => t[0]).join("|"), select: SEED_SELECT, "per-page": 50 }), { signal });
+  const r = await getJSON(oaUrl("/works", { filter: "openalex:" + top.map(t => t[0]).join("|"), select: SEED_SELECT_LITE, "per-page": 50 }), { signal });
   const byId = new Map((r.results || []).map(w => [shortId(w.id), w]));
   S.cociteList = top.map(([id, n]) => ({ w: byId.get(id), n, inRefs: refSet.has(id) })).filter(x => x.w);
   S.cociteRefsKnown = refSet.size > 0;
@@ -1725,7 +1858,7 @@ $("orcidBtn").onclick = async () => {
   else { msg("Enter an ORCID like 0000-0002-1825-0097, or an OpenAlex author ID like A5023888391.", "warn"); return; }
   const signal = begin("Finding your papers…"); if (!signal) return;
   let works = [], total = 0;
-  try { const r = await getJSON(oaUrl("/works", { filter, select: SEED_SELECT, sort: "publication_year:desc", "per-page": 200 }), { signal }); works = r.results || []; total = r.meta?.count || works.length; }
+  try { const r = await getJSON(oaUrl("/works", { filter, select: SEED_SELECT_LITE, sort: "publication_year:desc", "per-page": 200 }), { signal }); works = r.results || []; total = r.meta?.count || works.length; }
   catch(e){ if (e.name !== "AbortError") msg(friendlyError(e), "err"); }
   finally { end(); }
   if (!works.length){ if (!$("msg").textContent) msg("No papers found for that ID in OpenAlex.", "warn"); return; }
@@ -1751,7 +1884,7 @@ $("loadMine").onclick = async () => {
   if (!ids.length) return;
   const signal = begin("Loading your papers…"); if (!signal) return;
   const byId = new Map(); let failed = false;
-  try { for (let i = 0; i < ids.length; i += 50){ const r = await getJSON(oaUrl("/works", { filter: "openalex:" + ids.slice(i, i + 50).join("|"), select: SEED_SELECT, "per-page": 50 }), { signal }); for (const w of r.results || []) byId.set(shortId(w.id), w); } }
+  try { for (let i = 0; i < ids.length; i += 50){ const r = await getJSON(oaUrl("/works", { filter: "openalex:" + ids.slice(i, i + 50).join("|"), select: SEED_SELECT_LITE, "per-page": 50 }), { signal }); for (const w of r.results || []) byId.set(shortId(w.id), w); } }
   catch(e){ failed = true; if (e.name !== "AbortError") msg(friendlyError(e), "err"); }
   finally { end(); }
   if (failed) return;
@@ -1859,7 +1992,7 @@ $("zotAsSeeds").onclick = async () => {
   if (dois.length > 100 && !(await confirmBox("Analyse many papers?", `This collection has ${dois.length} papers with a DOI. Fetching who cites all of them can take a while.`))) return;
   const signal = begin("Looking up your Zotero papers…"); if (!signal) return;
   let works = new Map(), failed = false;
-  try { works = await oaByDois(dois, SEED_SELECT, signal); } catch(e){ failed = true; if (e.name !== "AbortError") msg(friendlyError(e), "err"); } finally { end(); }
+  try { works = await oaByDois(dois, SEED_SELECT_LITE, signal); } catch(e){ failed = true; if (e.name !== "AbortError") msg(friendlyError(e), "err"); } finally { end(); }
   if (failed) return;
   if (!works.size){ msg(`None of the ${dois.length} DOIs were found in OpenAlex. Try “Import as a list” instead.`, "warn"); return; }
   if (S.seeds.length && !(await confirmBox("Replace your list?", `This replaces the ${new Set(S.seeds.map(s => s.label)).size} papers in your list with ${works.size} from Zotero.`))) return;
@@ -2340,7 +2473,7 @@ async function loadSumInfo(s){
   SUM.info.set(s.id, info);
   if (s.oaId){
     try {
-      const w = await getJSON(oaUrl("/works/" + s.oaId, { select: SUM_SELECT }), {}, 3);
+      const w = s._sum || await getJSON(oaUrl("/works/" + s.oaId, { select: SUM_SELECT }), {}, 3);   // reuse the lookup when we have it
       const pt = w.primary_topic || {};
       Object.assign(info, { abstract: invertAbstract(w.abstract_inverted_index), field: pt.field?.display_name || "", subfield: pt.subfield?.display_name || "",
         topic: pt.display_name || "", keywords: (w.keywords || []).map(k => k.display_name).filter(Boolean).slice(0, 8),
@@ -2559,3 +2692,113 @@ document.querySelectorAll(".acts2 .menupop .btn").forEach(b => b.addEventListene
 try { if (store.get("breakdown2") === "0") $("breakdown").open = false; } catch(e){}
 $("breakdown").addEventListener("toggle", () => { try { store.set("breakdown2", $("breakdown").open ? "1" : "0"); } catch(e){} if ($("breakdown").open && S.records.length) renderYear(); });
 updateRunOptsSummary();
+
+
+/* ================= "Search in" toggle: which part of each paper the search box looks at ================= */
+function searchHay(r, sin){
+  const parts = sin === "title" ? [r.title]
+    : sin === "abstract" ? [r.abstract, r.tldr, r.scholar_snippet]
+    : sin === "keywords" ? [r.keywords, r.all_topics, r.primary_topic, r.field, r.subfield]
+    : sin === "authors" ? [r.authors, r.institutions]
+    : sin === "venue" ? [r.venue]
+    : [r.title, r.abstract, r.keywords, r.all_topics, r.authors, r.venue, r.tldr, r.scholar_snippet, r.cite_contexts, r.mark_note];
+  return parts.filter(Boolean).join(" ").toLowerCase();
+}
+const SIN_HINT = { all: "Search titles, abstracts, keywords, authors…", title: "Search titles…", abstract: "Search abstracts…", keywords: "Search keywords and topics…", authors: "Search authors and institutions…", venue: "Search journals…" };
+document.querySelectorAll("input[name=sin]").forEach(r => r.addEventListener("change", () => {
+  $("filter").placeholder = SIN_HINT[r.value] || SIN_HINT.all;
+  try { store.set("sin", r.value); } catch(e){}
+  S.page = 0; applyFilters();
+}));
+try { const v = store.get("sin"); const el = v && document.querySelector(`input[name=sin][value="${v.replace(/[^a-z]/g, "")}"]`); if (el){ el.checked = true; $("filter").placeholder = SIN_HINT[el.value]; } } catch(e){}
+
+
+/* ================= Semantic Scholar as a database (free; needs a DOI) ================= */
+const S2_FIELDS = "title,abstract,year,venue,authors,externalIds,citationCount,openAccessPdf,publicationTypes,s2FieldsOfStudy,url";
+async function fetchS2Cites(seeds, dir, maxN, map, signal){
+  const withDoi = [...new Map(seeds.filter(s => s.doi).map(s => [s.doi.toLowerCase(), s])).values()];
+  const noDoi = [...new Set(seeds.filter(s => !s.doi).map(s => s.label))];
+  if (!withDoi.length) return { note: "Semantic Scholar: skipped (these papers have no DOI).", listed: 0 };
+  const key = $("s2key").value.trim(); const headers = key ? { "x-api-key": key } : {};
+  const byDoi = new Map(), byTitle = new Map();
+  const tkey = (t, y) => { const n = normTitle(t); return n.length >= 30 ? n : n.length >= 12 && y ? n + "|" + y : ""; };
+  for (const r of map.values()){ if (r.doi) byDoi.set(r.doi.toLowerCase(), r); const t = tkey(r.title, r.year); if (t) byTitle.set(t, r); }
+  const cap = Math.min(maxN, 9000); let added = 0, merged = 0, listed = 0, capped = false; const missing = [], failed = [];
+  for (const seed of withDoi){
+    const what = dir === "citing" ? "citations" : "references", inner = dir === "citing" ? "citingPaper" : "citedPaper";
+    try {
+      for (let off = 0; ; off += 1000){
+        if (off >= cap){ capped = true; break; }
+        const j = await getJSON(`${S2P}DOI:${encodeURIComponent(seed.doi)}/${what}?fields=${S2_FIELDS}&offset=${off}&limit=${Math.min(1000, cap - off)}`, { headers, signal }, 4);
+        const data = Array.isArray(j?.data) ? j.data : [];
+        for (const it of data){
+          const p = it?.[inner]; if (!p || !p.title) continue; listed++;
+          const doi = bareDoi(p.externalIds?.DOI || (p.externalIds?.ArXiv ? "10.48550/arXiv." + p.externalIds.ArXiv : ""));
+          const tk = tkey(p.title, p.year);
+          const ex = (doi && byDoi.get(doi.toLowerCase())) || (tk && byTitle.get(tk));
+          if (ex){
+            if (!ex.abstract && typeof p.abstract === "string" && p.abstract.trim()){ ex.abstract = p.abstract.trim(); ex.abstract_source = "Semantic Scholar"; }
+            mergeInto(map, ex, "Semantic Scholar", seed.label); merged++; continue;
+          }
+          const r = s2Record(p, doi);
+          mergeInto(map, r, "Semantic Scholar", seed.label); added++;
+          if (doi) byDoi.set(doi.toLowerCase(), r); if (tk) byTitle.set(tk, r);
+        }
+        progress(listed, 0, `Semantic Scholar: ${fmt(listed)} ${dir === "citing" ? "citing papers" : "references"}…`);
+        if (!j?.next || data.length === 0) break;
+        if (!key) await sleep(1100, signal);
+      }
+    } catch(e){
+      if (e.name === "AbortError") throw e;
+      if (e.status === 404) missing.push(seed.label); else failed.push(`${seed.label} (${e.status === 429 ? "busy" : e.status || "network"})`);
+    }
+  }
+  const word = dir === "citing" ? "citing papers" : "references";
+  const note = `Semantic Scholar: ${fmt(listed)} ${word} (${fmt(added)} new${merged ? `, ${fmt(merged)} also in OpenAlex` : ""})` +
+    (capped ? `; stopped at ${fmt(cap)} per paper, in Semantic Scholar's order` : "") + "." +
+    (missing.length ? ` Not in Semantic Scholar: ${missing.join(", ")}.` : "") +
+    (failed.length ? ` Couldn't fetch: ${failed.join(", ")}; try again later or add a free S2 key.` : "") +
+    (noDoi.length ? ` Skipped (no DOI): ${noDoi.join(", ")}.` : "");
+  if (!listed && failed.length && !missing.length){ const e = new Error(note); e.user = true; throw e; }
+  return { note, listed, capped };
+}
+function s2Record(p, doi){
+  const r = blankRecord(); const au = Array.isArray(p.authors) ? p.authors.map(a => a?.name).filter(Boolean) : [];
+  const types = Array.isArray(p.publicationTypes) ? p.publicationTypes : [];
+  const field = Array.isArray(p.s2FieldsOfStudy) ? (p.s2FieldsOfStudy.find(f => f?.source === "s2-fos-model") || p.s2FieldsOfStudy[0])?.category || "" : "";
+  const abs = typeof p.abstract === "string" ? p.abstract.trim() : "";
+  Object.assign(r, {
+    _key: "S2:" + String(p.paperId || doi || normTitle(p.title)).slice(0, 120), _aids: au.map(() => ""), _anames: au,
+    title: String(p.title), authors: au.join("; "), first_author: au[0] || "", year: p.year ?? "", venue: p.venue || "",
+    type: types.includes("Review") ? "review" : /arxiv|biorxiv|chemrxiv|medrxiv/i.test(p.venue || "") ? "preprint" : "article",
+    cited_by_count: Number.isFinite(p.citationCount) ? p.citationCount : "", doi: doi || "",
+    url: safeUrl(doi ? "https://doi.org/" + doi : p.url), field, abstract: abs, abstract_source: abs ? "Semantic Scholar" : "",
+    oa_url: safeUrl(p.openAccessPdf?.url), open_access: p.openAccessPdf?.url ? "yes" : "", match_method: "Semantic Scholar"
+  });
+  return r;
+}
+
+
+/* ================= find a paper through Semantic Scholar (used when OpenAlex is unavailable) ================= */
+async function resolveViaS2(it, signal){
+  const key = $("s2key").value.trim(); const headers = key ? { "x-api-key": key } : {};
+  const f = "title,year,venue,authors,externalIds,citationCount";
+  const title = it.entry?.title || it.title || (it.kind === "text" ? it.text : "");
+  let p = null;
+  const doi = it.kind === "doi" ? it.id : it.entry?.doi;
+  try {
+    if (doi) p = await getJSON(`${S2P}DOI:${encodeURIComponent(bareDoi(doi))}?fields=${f}`, { headers, signal }, 3);
+    else if (it.kind === "arxiv") p = await getJSON(`${S2P}ARXIV:${encodeURIComponent(it.id)}?fields=${f}`, { headers, signal }, 3);
+    else if (title){ const j = await getJSON(`${S2P}search/match?query=${encodeURIComponent(String(title).slice(0, 300))}&fields=${f}`, { headers, signal }, 3); p = j?.data?.[0] || null; }
+  } catch(e){ if (e.name === "AbortError") throw e; }
+  if (!p || !p.title){ const e = new Error("OpenAlex isn't available right now and Semantic Scholar couldn't find this paper. Try again later, or add a free OpenAlex key in ⚙ Settings."); e.user = true; throw e; }
+  const d = bareDoi(p.externalIds?.DOI || (p.externalIds?.ArXiv ? "10.48550/arXiv." + p.externalIds.ArXiv : ""));
+  const w = { id: "s2:" + p.paperId, doi: d ? "https://doi.org/" + d : "", display_name: p.title, publication_year: p.year || "", cited_by_count: p.citationCount || 0,
+    authorships: (p.authors || []).map(a => ({ author: { display_name: a?.name || "" } })), primary_location: { source: { display_name: p.venue || "" } },
+    type: "article", referenced_works: [], referenced_works_count: null, counts_by_year: [] };
+  return { label: it.entry?.title || it.id || it.text || p.title, works: [w], pre: new Set([w.id]), auto: true };
+}
+$("clearCache").onclick = async () => {
+  const ok = await oaCacheClear();
+  $("serpAccount").textContent = ok ? "Cache cleared: the next search downloads fresh results." : "This browser doesn't allow the cache, so there was nothing to clear.";
+};

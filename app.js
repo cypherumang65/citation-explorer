@@ -658,7 +658,7 @@ function renderSeeds(){
     return `<div class="seed"><span class="n">${esc(s.label)}</span><div class="grow">
       <div class="ttl">${s.type === "preprint" ? '<span class="badge pre">preprint</span>' : ""}${s.version ? '<span class="badge">other version</span>' : ""}${esc(s.title)}</div>
       <div class="meta">${esc([au, s.year, s.venue].filter(Boolean).join(" · "))}</div>
-      <div class="meta">${s.oaId ? `OpenAlex: cited by ${fmt(s.cited)}${s.impact?.recent_cites !== "" && s.impact?.recent_cites != null ? ` (${fmt(s.impact.recent_cites)} in the last 2 years)` : ""} · ${s.impact?.fwci !== "" && s.impact?.fwci != null ? `<span title="Field-weighted citation impact: 1 = world average">FWCI ${esc(s.impact.fwci)}</span>${s.impact.top ? " · " + esc(s.impact.top) : ""} · ` : ""}${s.refs ?? "?"} references` : (s.s2 ? "From Semantic Scholar (OpenAlex wasn't available)" : "Not in OpenAlex (Scholar only)")}${s.scholar?.total ? ` · Scholar: cited by ${fmt(s.scholar.total)}` : ""}${s.doi ? ` · <a href="https://doi.org/${esc(s.doi)}" target="_blank" rel="noopener noreferrer">${esc(s.doi)}</a>` : ""} · <a href="${esc(scholarSearch(s.title))}" target="_blank" rel="noopener noreferrer">Open in Google Scholar ↗</a></div>
+      <div class="meta">${s.oaId ? `OpenAlex: cited by ${fmt(s.cited)}${s.impact?.recent_cites !== "" && s.impact?.recent_cites != null ? ` (${fmt(s.impact.recent_cites)} in the last 2 years)` : ""} · ${s.impact?.fwci !== "" && s.impact?.fwci != null ? `<span title="Field-weighted citation impact: 1 = world average">FWCI ${esc(s.impact.fwci)}</span>${s.impact.top ? " · " + esc(s.impact.top) : ""} · ` : ""}${s.refs ?? "?"} references` : (s.s2 ? "From Semantic Scholar" + (s.cited ? ` · cited by ${fmt(s.cited)} there` : "") : "Not in OpenAlex (Scholar only)")}${s.scholar?.total ? ` · Scholar: cited by ${fmt(s.scholar.total)}` : ""}${s.doi ? ` · <a href="https://doi.org/${esc(s.doi)}" target="_blank" rel="noopener noreferrer">${esc(s.doi)}</a>` : ""} · <a href="${esc(scholarSearch(s.title))}" target="_blank" rel="noopener noreferrer">Open in Google Scholar ↗</a></div>
     </div><button class="btn small ghost x" data-i="${i}" title="Remove">✕</button></div>`;
   }).join("");
   $("seedList").querySelectorAll(".x").forEach(b => b.onclick = () => { if (S.busy) return; S.seeds.splice(+b.dataset.i, 1); renderSeeds(); });
@@ -754,7 +754,7 @@ async function find(mode){
       progress(i, items.length, items.length > 1 ? `Paper ${i + 1} of ${items.length}` : "");
       try {
         let r;
-        try { r = await resolveItem(items[i], signal); }
+        try { r = dbMode() === "s2" ? await resolveViaS2(items[i], signal) : await resolveItem(items[i], signal); }   // "Semantic Scholar" chosen: don't ask OpenAlex at all
         catch(e){
           const db = document.querySelector("input[name=src]:checked")?.value;
           if (e.name === "AbortError" || !(db === "auto" || db === "s2" || db === "oas2") || !canFallBack(e)) throw e;

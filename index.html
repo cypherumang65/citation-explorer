@@ -490,6 +490,10 @@ body:has(#seedCard:not(.hidden)) #q{min-height:46px}
 
 .opts .opt{min-width:0;max-width:100%}
 .opts .seg{max-width:100%}
+
+.srcrow{display:flex;gap:8px;align-items:center;margin-top:10px;min-width:0;flex-wrap:wrap}
+.srcrow .seg{max-width:100%}
+@media (max-width:640px){.srcrow{flex-direction:column;align-items:stretch}.srcrow .seg{width:100%}.srcrow .seg label{flex:1;justify-content:center;padding:6px 6px}}
 </style>
 </head>
 <body>
@@ -550,6 +554,15 @@ body:has(#seedCard:not(.hidden)) #q{min-height:46px}
       <span class="ex" data-v="Perdew, J. P., Burke, K., &amp; Ernzerhof, M. (1996). Generalized gradient approximation made simple. Physical review letters, 77(18), 3865.">Scholar “Cite” (APA)</span>
       <span class="ex" data-v="@article{jumper2021highly,&#10;  title={Highly accurate protein structure prediction with AlphaFold},&#10;  author={Jumper, John and Evans, Richard and others},&#10;  journal={Nature},&#10;  volume={596},&#10;  year={2021}&#10;}">BibTeX</span>
     </div>
+    <div class="srcrow" id="srcWrap"><span class="hint">Search in</span>
+      <div class="seg dbbar" role="radiogroup" aria-label="Database to search">
+        <label title="OpenAlex first; switches to Semantic Scholar by itself if OpenAlex is busy or down"><input type="radio" name="src" value="auto" checked>Auto</label>
+        <label title="Free; abstracts, fields, topics and keywords"><input type="radio" name="src" value="oa">OpenAlex</label>
+        <label title="Free; sometimes has papers or abstracts OpenAlex misses (no topics)"><input type="radio" name="src" value="s2">Semantic Scholar</label>
+        <label title="Fetch from both and merge them; the found_in column shows which found each paper"><input type="radio" name="src" value="oas2">Both</label>
+        <label class="gsopt" title="Scholar's own Cited-by list, via SerpApi"><input type="radio" name="src" value="gs">Google Scholar</label>
+        <label class="gsopt" title="OpenAlex and Google Scholar, merged"><input type="radio" name="src" value="both">OpenAlex + Scholar</label>
+      </div></div>
     <div class="row" style="margin-top:12px">
       <span class="hint grow" id="enterHint">Enter to search · Shift+Enter for a new line</span>
       <button class="btn ghost" id="addBtn" title="Keep the papers already in the list and add this one (e.g. all your own papers)">＋ Add to list</button>
@@ -615,15 +628,6 @@ body:has(#seedCard:not(.hidden)) #q{min-height:46px}
       <div class="seg" role="radiogroup" aria-label="Direction">
         <label><input type="radio" name="dir" value="citing" checked>Papers citing it</label>
         <label><input type="radio" name="dir" value="refs">Its reference list</label>
-      </div></div>
-    <div class="opt" id="srcWrap"><span>Database</span>
-      <div class="seg dbbar" role="radiogroup" aria-label="Database">
-        <label title="OpenAlex first; switches to Semantic Scholar by itself if OpenAlex is busy or down"><input type="radio" name="src" value="auto" checked>Auto</label>
-        <label title="Free; abstracts, fields, topics and keywords"><input type="radio" name="src" value="oa">OpenAlex</label>
-        <label title="Free; sometimes has papers or abstracts OpenAlex misses (no topics)"><input type="radio" name="src" value="s2">Semantic Scholar</label>
-        <label title="Fetch from both and merge them; the found_in column shows which found each paper"><input type="radio" name="src" value="oas2">Both</label>
-        <label class="gsopt" title="Scholar's own Cited-by list, via SerpApi"><input type="radio" name="src" value="gs">Google Scholar</label>
-        <label class="gsopt" title="OpenAlex and Google Scholar, merged"><input type="radio" name="src" value="both">OpenAlex + Scholar</label>
       </div></div>
     <span class="spacer"></span>
     <button class="btn primary" id="getBtn">Get citations</button>
@@ -698,8 +702,8 @@ body:has(#seedCard:not(.hidden)) #q{min-height:46px}
       </select>
       <button class="btn" id="filtersBtn" aria-expanded="false" aria-controls="moreFilters">Filters <span class="fcount hidden" id="fcount"></span></button>
     </div>
-    <div class="sinwrap"><span class="hint">Search in</span>
-      <div class="seg sinbar" role="radiogroup" aria-label="Search in" id="searchIn">
+    <div class="sinwrap"><span class="hint">Look in</span>
+      <div class="seg sinbar" role="radiogroup" aria-label="Look in" id="searchIn">
         <label><input type="radio" name="sin" value="all" checked>All</label>
         <label><input type="radio" name="sin" value="title">Title</label>
         <label><input type="radio" name="sin" value="abstract">Abstract</label>

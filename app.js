@@ -170,11 +170,18 @@ async function oaCacheClear(){
   const db = await oaCacheOpen(); if (!db) return false;
   return new Promise(res => { try { const tx = db.transaction(["r", "m"], "readwrite"); tx.objectStore("r").clear(); tx.objectStore("m").clear(); tx.oncomplete = () => res(true); tx.onerror = () => res(false); } catch(e){ res(false); } });
 }
+// When OpenAlex says "too many requests" (usually the free daily limit), don't keep waiting on it:
+// for 10 minutes Auto mode goes straight to Semantic Scholar.
+const OASTATE = { downUntil: 0 }, S2STATE = { busyUntil: 0 };   // Semantic Scholar: after a "busy", pause it for a minute
+const dbMode = () => document.querySelector("input[name=src]:checked")?.value || "auto";
+const oaSkip = url => typeof url === "string" && url.startsWith(OA + "/") && Date.now() < OASTATE.downUntil && dbMode() !== "oa";
 const abortIf = signal => { if (signal?.aborted) throw new DOMException("Aborted", "AbortError"); };
 
 /* ---------------- HTTP with retries ---------------- */
 async function getJSON(url, opts = {}, tries = 5){
   abortIf(opts.signal);
+  if (oaSkip(url) && !(await oaCacheGet(oaCacheKey(url)))){ const e = new Error("HTTP 429: OpenAlex limit reached"); e.status = 429; e.url = url; throw e; }
+  if (typeof url === "string" && url.startsWith("https://api.semanticscholar.org") && Date.now() < S2STATE.busyUntil){ const e = new Error("HTTP 429: Semantic Scholar busy"); e.status = 429; e.url = url; throw e; }
   // single-paper and search lookups are cached by URL; paged lists are cached as whole searches in fetchOA
   const cacheable = typeof url === "string" && url.startsWith(OA + "/") && !opts.method && !/[?&](page|cursor)=/.test(url);
   const ck = cacheable ? oaCacheKey(url) : "";
@@ -190,11 +197,16 @@ async function getJSONLive(url, opts = {}, tries = 5){
     try { r = await fetch(url, opts); }
     catch(e){
       if (e.name === "AbortError") throw e;
-      if (i >= tries - 1) { const er = new Error("Network error — check your connection (" + e.message + ")"); er.network = true; throw er; }
+      const isS2 = String(url).startsWith("https://api.semanticscholar.org");
+      if (i >= tries - 1 || (isS2 && i >= 1)) { if (isS2) S2STATE.busyUntil = Date.now() + 60000; const er = new Error("Network error — check your connection (" + e.message + ")"); er.network = true; er.status = isS2 ? 429 : undefined; er.url = String(url); throw er; }
       await sleep(wait * (0.75 + Math.random() * 0.5), opts.signal); wait *= 2; continue;
     }
     if (r.ok) return r.json();
-    if ((r.status === 429 || r.status >= 500) && i < tries - 1){
+    const oa429 = r.status === 429 && String(url).startsWith(OA + "/");
+    const s2busy = r.status === 429 && String(url).startsWith("https://api.semanticscholar.org");
+    if (s2busy && i >= 1){ S2STATE.busyUntil = Date.now() + 60000; tries = i + 1; }
+    if (oa429 && (i >= 1 || dbMode() !== "oa")) OASTATE.downUntil = Date.now() + 10 * 60 * 1000;
+    if ((r.status === 429 || r.status >= 500) && i < tries - 1 && !(oa429 && (i >= 1 || dbMode() !== "oa"))){
       const ra = Number(r.headers.get("Retry-After"));
       await sleep((ra > 0 && ra < 90 ? ra * 1000 : wait) * (0.75 + Math.random() * 0.5), opts.signal); wait *= 2; continue;
     }
@@ -2784,14 +2796,19 @@ async function resolveViaS2(it, signal){
   const key = $("s2key").value.trim(); const headers = key ? { "x-api-key": key } : {};
   const f = "title,year,venue,authors,externalIds,citationCount";
   const title = it.entry?.title || it.title || (it.kind === "text" ? it.text : "");
-  let p = null;
+  let p = null, busy = false;
   const doi = it.kind === "doi" ? it.id : it.entry?.doi;
   try {
     if (doi) p = await getJSON(`${S2P}DOI:${encodeURIComponent(bareDoi(doi))}?fields=${f}`, { headers, signal }, 3);
     else if (it.kind === "arxiv") p = await getJSON(`${S2P}ARXIV:${encodeURIComponent(it.id)}?fields=${f}`, { headers, signal }, 3);
     else if (title){ const j = await getJSON(`${S2P}search/match?query=${encodeURIComponent(String(title).slice(0, 300))}&fields=${f}`, { headers, signal }, 3); p = j?.data?.[0] || null; }
-  } catch(e){ if (e.name === "AbortError") throw e; }
-  if (!p || !p.title){ const e = new Error("OpenAlex isn't available right now and Semantic Scholar couldn't find this paper. Try again later, or add a free OpenAlex key in ⚙ Settings."); e.user = true; throw e; }
+  } catch(e){ if (e.name === "AbortError") throw e; busy = e.status !== 404; }
+  if (!p || !p.title){
+    const e = new Error(busy
+      ? "Both free databases are refusing requests from your network right now: OpenAlex's daily limit is used up and Semantic Scholar is busy. Wait a few minutes and try again, or add a free OpenAlex key in ⚙ Settings (openalex.org/settings/api), which gives you your own limit."
+      : "OpenAlex isn't available right now and Semantic Scholar couldn't find this paper. Try again later, or add a free OpenAlex key in ⚙ Settings.");
+    e.user = true; throw e;
+  }
   const d = bareDoi(p.externalIds?.DOI || (p.externalIds?.ArXiv ? "10.48550/arXiv." + p.externalIds.ArXiv : ""));
   const w = { id: "s2:" + p.paperId, doi: d ? "https://doi.org/" + d : "", display_name: p.title, publication_year: p.year || "", cited_by_count: p.citationCount || 0,
     authorships: (p.authors || []).map(a => ({ author: { display_name: a?.name || "" } })), primary_location: { source: { display_name: p.venue || "" } },
